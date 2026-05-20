@@ -1,0 +1,769 @@
+---
+title: "BI PROJECT TRANSCRIPTOME E1A effects"
+author: "EP"
+output: html_document
+date: "2026-05-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+ 
+library(data.table)
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(ggrepel)
+library(dplyr)
+library(tximport)
+library(EnhancedVolcano)
+library(clusterProfiler)
+library(org.Hs.eg.db)  
+library(enrichplot)     
+require(DOSE)
+library(tftargets)
+library(tidyverse)
+```
+
+```{r}
+# List Salmon output
+samples <- list.files("salmon_quant_24/Salmon quant", full.names = TRUE)
+files <- file.path(samples, "quant.sf")
+names(files) <- basename(samples)
+```
+
+
+Imort files and count genes:
+```{r}
+tx2gene <- read.csv("data/tx2gene_symbols.csv")
+
+txi_gene <- tximport(files, type = "salmon", tx2gene = tx2gene, countsFromAbundance="no")
+txi_gene_TPM <-  tximport(files, type = "salmon", tx2gene = tx2gene, countsFromAbundance = "lengthScaledTPM")
+
+txi_counts <- data.frame(txi_gene$counts)
+txi_TPM <- data.frame(txi_gene_TPM$counts)
+write.table(txi_counts, file = "raw_counts_all_samples.txt", sep = "\t", row.names = TRUE, quote = FALSE)
+write.csv2(txi_counts, file = "raw_counts_all_samples.csv", row.names = TRUE, quote = FALSE)
+write.csv2(txi_TPM, file = "TPM_all_samples.csv", row.names = TRUE, quote = FALSE)
+```
+
+
+Add information about samples
+```{r metadata, echo=FALSE}
+metadata <- data.frame(
+    full_condition = factor(rep(c("ctrl", "E1A", "oxpl", "oxpl_E1A"), each=3,times=2)),
+    condition = factor(rep(c("ctrl", "oxpl"), each=6,times=2)),
+    e1a_status = factor(rep(c("negative", "positive"), each=3,times=4)),
+    cell_line = factor(rep(c("HCT116", "HCT116_oxpl_R"), each=12)),
+    stat = factor(rep(c("ctrl", "ctrl_E1A", "oxpl", "oxpl_E1A", "R_ctrl", "R_ctrl_E1A", "R_oxpl", "R_oxpl_E1A"),each=3)))
+
+rownames(metadata) <- colnames(txi_gene$counts)
+```
+
+General model for all factors and their interactions
+```{r deseq, echo=FALSE}
+dds <- DESeqDataSetFromTximport(
+    txi = txi_gene,
+    colData = metadata,
+    design = ~ e1a_status * condition * cell_line # с учетом всех взаимодействий
+)
+
+dds <- dds[rowSums(counts(dds)) > 0, ]
+dds <- DESeq(dds) 
+
+results <- results(dds, alpha=0.05)
+resultsNames(dds)
+
+resOrdered <- results[order(results$pvalue),]
+summary(results)
+
+results_df <- as.data.frame(results)
+
+res_clean <- results[!is.na(results$padj) & !is.na(results$log2FoldChange), ]
+
+res_sig <- res_clean[abs(res_clean$log2FoldChange) > 1.5 & res_clean$padj < 0.05, ]
+res_sig_df <- as.data.frame(res_sig)
+```
+
+
+```{r deseq_stats, echo=FALSE}
+# Get all the contrast names
+contrast_names <- resultsNames(dds)
+contrast_names <- contrast_names[contrast_names != "Intercept"]  # убираем Intercept
+
+# VST normalization
+vsd <- vst(dds, blind = FALSE)
+
+sample_names <- as.character(colData(dds)$stat)
+
+plot_contrast_heatmap <- function(contrast_name, n_top = 30) {
+  res_contrast <- results(dds, name = contrast_name)
+  
+  res_contrast <- res_contrast[!is.na(res_contrast$padj), ]
+  
+  res_sorted <- res_contrast[order(res_contrast$padj), ]
+  top_genes <- head(rownames(res_sorted), n_top)
+
+  top_data <- assay(vsd)[top_genes, ]
+  colnames(top_data) <- sample_names
+  
+  title <- paste("Top", n_top, "genes for contrast:", contrast_name)
+  
+  pheatmap(top_data,
+           scale = "row",
+           main = title,
+           fontsize_row = 6,
+           fontsize_col = 8,
+           angle_col = 45,
+           treeheight_row = 50,
+           treeheight_col = 50,
+           border_color = NA,
+           silent = FALSE)
+}
+
+for (contrast in contrast_names) {
+  plot_contrast_heatmap(contrast, n_top = 30)
+}
+```
+
+```{r}
+# e1a_status_positive_vs_negative
+res_E1A <- results(dds, name = "e1a_status_positive_vs_negative")
+
+summary(res_E1A)
+
+res_E1A_df <- as.data.frame(res_E1A)
+head(res_E1A_df)
+```
+
+```{r}
+# Number of significant genes
+sig_genes <- res_E1A[!is.na(res_E1A$padj) & res_E1A$padj < 0.05, ]
+total_sig <- nrow(sig_genes)
+
+# Up / Down
+up_genes <- sig_genes[sig_genes$log2FoldChange > 0, ]
+down_genes <- sig_genes[sig_genes$log2FoldChange < 0, ]
+
+# padj < 0.05 И |log2FC| > 1
+sig_genes_fc1 <- res_E1A[!is.na(res_E1A$padj) & 
+                         res_E1A$padj < 0.05 & 
+                         abs(res_E1A$log2FoldChange) > 1, ]
+
+up_fc1 <- sig_genes_fc1[sig_genes_fc1$log2FoldChange > 1, ]
+down_fc1 <- sig_genes_fc1[sig_genes_fc1$log2FoldChange < -1, ]
+
+cat("Total significant genes:", nrow(sig_genes_fc1), "\n")
+cat("  - Up (log2FC > 1):", nrow(up_fc1), "\n")
+cat("  - Down (log2FC < -1):", nrow(down_fc1), "\n")
+```
+
+At the threshold of ∣log2FC∣>1, we see 117 significant genes, of which 109 are upregulated and only 8 are downregulated. This is consistent with the fact that E1A causes a powerful transcriptional rearrangement of the cell and, in a number of systems, primarily acts as an activator of expression, although it can simultaneously repress individual pathways through interactions with pRb/E2F and p300/CBP.
+
+
+```{r}
+top_genes <- head(order(res_E1A$padj), 30)
+
+top_data <- assay(vsd)[top_genes, ]
+colnames(top_data) <- as.character(colData(dds)$stat)
+
+pheatmap(top_data,
+           scale = "row",
+           main = "Top 30 DEGs: E1A effect",
+           fontsize_row = 6,
+           fontsize_col = 8,
+           angle_col = 45,
+           treeheight_row = 50,
+           treeheight_col = 50,
+           border_color = NA,
+           silent = FALSE)
+```
+
+On the heatmap, E1A-positive and E1A-negative samples form separate clusters, meaning that the E1A effect affects not just one gene, but the entire expression program.
+
+```{r}
+EnhancedVolcano(res_E1A,
+    lab = rownames(res_E1A),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    title = 'E1A effect (positive vs negative)',
+    pCutoff = 0.05,
+    FCcutoff = 1,
+    pointSize = 2.0,
+    labSize = 4.0)
+```
+
+In the volcano plot, most significant genes are shifted to the right, indicating increased expression in the E1A-positive group.
+Among the most prominent upregulated genes are JUNB, ARC, CIRBP-AS1, SP110, ZFP36, and HSPA1A, while among the downregulated genes, for example, PDXDC2P
+
+This profile is consistent with the fact that E1A is known as a protein that activates AP-1-dependent and other early transcriptional programs, including through interaction with p300/CBP
+
+```{r}
+# Top 10 genes by importance
+top10_genes <- head(rownames(res_E1A)[order(res_E1A$padj)], 10)
+
+for (gene in top10_genes) {
+  ge <- plotCounts(dds, gene, intgroup = "stat", returnData = TRUE)
+  
+  p <- ggplot(ge, aes(x = stat, y = count, fill = stat)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+    geom_jitter(width = 0.2, size = 3, alpha = 0.8) +
+    scale_fill_brewer(palette = "Set2") +
+    labs(title = paste("Expression of", gene),
+         x = "", y = "Normalized Counts") +
+    theme_minimal() +
+    theme(legend.position = "none",
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 14, face = "bold"),
+          plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+  
+  print(p)
+}
+```
+
+E1A strongly induces an immediate-early transcriptional program in HCT116 cells, centered on AP-1 and early response genes such as JUNB and EGR1, together with stress/adaptation and chromatin-regulatory factors like DUSP1, HSPA1B, BRD2, and CCN2.
+
+
+```{r}
+# gene_stat
+gene_stat <- res_E1A$stat
+names(gene_stat) <- rownames(res_E1A)
+gene_stat <- na.omit(gene_stat)
+gene_stat <- sort(gene_stat, decreasing = TRUE)
+
+# SYMBOL → ENTREZ
+mapping <- mapIds(org.Hs.eg.db,
+                  keys = names(gene_stat),
+                  column = "ENTREZID",
+                  keytype = "SYMBOL",
+                  multiVals = "first")
+
+gene_stat_clean <- gene_stat[!is.na(mapping)]
+
+# GSEA
+gse_GO <- gseGO(geneList = gene_stat_clean,
+                ont = "ALL",
+                keyType = "SYMBOL",
+                minGSSize = 3,
+                maxGSSize = 800,
+                pvalueCutoff = 0.05,
+                verbose = TRUE,
+                OrgDb = org.Hs.eg.db,
+                pAdjustMethod = "BH")
+
+dotplot(gse_GO, showCategory = 6, split = ".sign") + facet_grid(. ~ .sign)  + theme(axis.text.y = element_text(size = 8))
+```
+
+GO GSEA analysis reveals that E1A suppresses ribosome biogenesis and rRNA processing, but activates extracellular matrix, neuron differentiation, cell projection morphogenesis, and blood vessel development.
+This indicates a pronounced reprogramming of the cellular state toward tissue remodeling and differentiation programs.
+The suppression of ribosome genesis can be explained as part of an antiproliferative program, since cancer cells require active ribosome biogenesis for rapid cell division.
+The enhancement of ECM- and differentiation-related pathways may be a sign that E1A disrupts the tumor transcriptional program, shifting the cell from a growth state to a state of remodeling and partial "de-oncogenization."
+
+
+```{r}
+# GO BP (Biological Process)
+gse_GO_BP <- gseGO(geneList = gene_stat_clean,
+                   ont = "BP",
+                   keyType = "SYMBOL",
+                   minGSSize = 3,
+                   maxGSSize = 800,
+                   pvalueCutoff = 0.05,
+                   verbose = FALSE,
+                   OrgDb = org.Hs.eg.db,
+                   pAdjustMethod = "BH")
+
+dotplot(gse_GO_BP, showCategory = 6, split = ".sign") + facet_grid(. ~ .sign) + theme(axis.text.y = element_text(size = 8))
+
+# GO MF (Molecular Function)
+gse_GO_MF <- gseGO(geneList = gene_stat_clean,
+                   ont = "MF",
+                   keyType = "SYMBOL",
+                   minGSSize = 3,
+                   maxGSSize = 800,
+                   pvalueCutoff = 0.05,
+                   verbose = FALSE,
+                   OrgDb = org.Hs.eg.db,
+                   pAdjustMethod = "BH")
+
+dotplot(gse_GO_MF, showCategory = 6, split = ".sign") + facet_grid(. ~ .sign) + theme(axis.text.y = element_text(size = 8))
+
+# GO CC (Cellular Component)
+gse_GO_CC <- gseGO(geneList = gene_stat_clean,
+                   ont = "CC",
+                   keyType = "SYMBOL",
+                   minGSSize = 3,
+                   maxGSSize = 800, 
+                   pvalueCutoff = 0.05,
+                   verbose = FALSE,
+                   OrgDb = org.Hs.eg.db,
+                   pAdjustMethod = "BH")
+
+dotplot(gse_GO_CC, showCategory = 6, split = ".sign") + facet_grid(. ~ .sign) + theme(axis.text.y = element_text(size = 8))
+```
+
+```{r}
+# SYMBOL → ENTREZ
+mapping_kegg <- mapIds(org.Hs.eg.db,
+                       keys = names(gene_stat),
+                       column = "ENTREZID",
+                       keytype = "SYMBOL",
+                       multiVals = "first")
+
+# geneList with ENTREZ ID
+gene_list_entrez <- gene_stat
+names(gene_list_entrez) <- mapping_kegg
+gene_list_entrez <- na.omit(gene_list_entrez)
+
+# KEGG GSEA
+gsea_kegg <- gseKEGG(geneList = gene_list_entrez,
+                     organism = "hsa",
+                     pvalueCutoff = 0.05,
+                     pAdjustMethod = "BH")
+
+gsea_kegg <- setReadable(gsea_kegg, 'org.Hs.eg.db', keyType = "ENTREZID")
+
+dotplot(gsea_kegg, showCategory = 6, split = ".sign") + facet_grid(. ~ .sign) + theme(axis.text.y = element_text(size = 8))
+```
+
+KEGG shows downregulation of proteasome, RNA degradation, ribosome, ribosome biogenesis, nuclear transport, and related pathways.
+This typically indicates a decrease in the cell's overall level of housekeeping activity: less protein synthesis, less ribosomogenesis, weaker control of RNA degradation, and possibly less nucleocytoplasmic trafficking.
+For HCT116, this can be interpreted as a weakening of the proliferative/growth mode and a restructuring of the cellular state.
+If phagosome, ECM-receptor interaction, neuroactive ligand-receptor interaction, and other signaling pathways are activated, this most often indicates that the cell is entering a state of remodeling, stress, and altered microenvironmental contacts and intercellular communication.
+
+```{r}
+#Transcription factors
+if (!require("tftargets")) {
+    install.packages("devtools")
+    devtools::install_github("slowkow/tftargets")
+}
+
+gmt_file <- "TRED_db.gmt"
+file_conn <- file(gmt_file, "w")
+
+for (tf_name in names(TRED)) {
+  target_genes <- TRED[[tf_name]]
+  gmt_line <- paste(
+    tf_name,                  
+    "TRED_target_genes",      
+    paste(target_genes, collapse = "\t"),  
+    sep = "\t"
+  )
+  writeLines(gmt_line, file_conn)
+}
+close(file_conn)
+
+gmt_to_TERM2GENE <- function(gmt_file) {
+  readLines(gmt_file) %>% 
+    strsplit("\t") %>% 
+    lapply(function(x) {
+      term <- x[1]
+      genes <- x[-c(1, 2)]  
+      data.frame(term = term, gene = genes)
+    }) %>% 
+    bind_rows()
+}
+
+TERM2GENE <- gmt_to_TERM2GENE("TRED_db.gmt")
+head(TERM2GENE)
+
+# GSEA on transcription factors
+gsea_TRED <- GSEA(geneList = gene_list_entrez,
+                  pvalueCutoff = 0.05,
+                  pAdjustMethod = "none",
+                  TERM2GENE = TERM2GENE)
+
+gsea_TRED <- setReadable(gsea_TRED, 'org.Hs.eg.db', keyType = "ENTREZID")
+
+dotplot(gsea_TRED, showCategory = 8, split = ".sign") + facet_grid(. ~ .sign)
+gseaplot2(gsea_TRED, geneSetID = 1:3)
+```
+
+GSEA of the TRED transcription factor database
+demonstrated that E1A expression leads to the activation of a wide range of transcription factors (NES 1.34 to 1.89), while no significantly suppressed TFs were detected.
+This is consistent with literature data: E1A primarily functions as a transcriptional activator through interaction with p300/CBP coactivators and regulation of the E2F pathway.
+E1A expression activates a wide range of transcription factors, including SMAD4, FOS, ATF2, ETS2, and others, indicating a profound reorganization of the cellular regulatory network.
+In HCT116, this likely reflects not a single linear pathway, but a complex shift between proliferation, stress response, and differentiation programs.
+
+
+```{r}
+# ctrl vs dox+
+keep <- colData(dds)$cell_line == "HCT116" & colData(dds)$condition == "ctrl"
+dds_HCT116 <- dds[, keep]
+
+table(dds_HCT116$e1a_status)
+```
+
+```{r}
+#  e1a_status only
+design(dds_HCT116) <- ~ e1a_status
+
+# DESeq2
+dds_HCT116 <- DESeq(dds_HCT116)
+
+# e1a_status_positive_vs_negative
+res_E1A_HCT116 <- results(dds_HCT116, name = "e1a_status_positive_vs_negative")
+summary(res_E1A_HCT116)
+```
+
+```{r}
+# padj < 0.05 и |log2FC| > 1
+up <- sum(res_E1A_HCT116$padj < 0.05 & res_E1A_HCT116$log2FoldChange > 1, na.rm = TRUE)
+down <- sum(res_E1A_HCT116$padj < 0.05 & res_E1A_HCT116$log2FoldChange < -1, na.rm = TRUE)
+cat("Up-regulated:", up, "\n")
+cat("Down-regulated:", down, "\n")
+cat("Total DEGs:", up + down, "\n")
+```
+
+The effect of E1A is significantly stronger in sensitive HCT116 cells (183 DEGs) compared to the full model (117 DEGs).
+In HCT116, E1A not only activates but also represses many genes (34 downregulated), whereas in the full model, downregulation is minimal (8 downregulated).
+This indicates that the resistant cell line and/or oxaliplatin modify the response to E1A, attenuating its transcriptional effects.
+
+
+```{r}
+# Top-30 по padj
+top_genes_HCT116 <- head(order(res_E1A_HCT116$padj), 30)
+
+# VST
+vsd_HCT116 <- vst(dds_HCT116, blind = FALSE)
+top_data_HCT116 <- assay(vsd_HCT116)[top_genes_HCT116, ]
+colnames(top_data_HCT116) <- ifelse(colData(dds_HCT116)$e1a_status == "negative", 
+                                    "ctrl", "E1A")
+
+# Heatmap
+pheatmap(top_data_HCT116,
+         scale = "row",
+         main = "Top 30 DEGs: E1A effect in HCT116",
+         fontsize_row = 6,
+         fontsize_col = 8,
+         angle_col = 0,         
+         treeheight_row = 50,
+         treeheight_col = 50,
+         border_color = NA)   
+```
+
+
+
+```{r}
+EnhancedVolcano(res_E1A_HCT116,
+    lab = rownames(res_E1A_HCT116),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    title = 'E1A effect in HCT116 (positive vs negative)',
+    pCutoff = 0.05,
+    FCcutoff = 1,
+    pointSize = 2.0,
+    labSize = 4.0)
+```
+
+In both models, E1A consistently activates the early response and AP-1-related program: JUNB, EGR1, ARC, and BRD2 are well-suited for this role.
+This means that, regardless of the background, E1A triggers rapid transcriptional rearrangements associated with stress, the immediate response, and the regulation of proliferation.
+
+```{r}
+# Список генов
+genes_of_interest <- c("JUNB", "EGR1", "DSP-AS1")
+
+for (gene in genes_of_interest) {
+  ge <- plotCounts(dds_HCT116, gene, intgroup = "e1a_status", returnData = TRUE)
+  
+  # Меняем названия для легенды
+  ge$condition <- ifelse(ge$e1a_status == "negative", "ctrl", "E1A")
+  
+  p <- ggplot(ge, aes(x = condition, y = count, fill = condition)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+    geom_jitter(width = 0.2, size = 3, alpha = 0.8) +
+    scale_fill_manual(values = c("ctrl" = "lightblue", "E1A" = "salmon")) +
+    labs(title = paste("Expression of", gene),
+         x = "", y = "Normalized Counts") +
+    theme_minimal() +
+    theme(legend.position = "none",
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12, face = "bold"),
+          plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+  
+  print(p)
+}
+```
+
+
+
+```{r}
+gene_stat_HCT116 <- res_E1A_HCT116$stat
+names(gene_stat_HCT116) <- rownames(res_E1A_HCT116)
+gene_stat_HCT116 <- na.omit(gene_stat_HCT116)
+gene_stat_HCT116 <- sort(gene_stat_HCT116, decreasing = TRUE)
+
+# SYMBOL → ENTREZ
+mapping_HCT116 <- mapIds(org.Hs.eg.db,
+                         keys = names(gene_stat_HCT116),
+                         column = "ENTREZID",
+                         keytype = "SYMBOL",
+                         multiVals = "first")
+
+gene_stat_clean_HCT116 <- gene_stat_HCT116[!is.na(mapping_HCT116)]
+
+# GSEA GO ALL 
+gse_GO_HCT116 <- gseGO(geneList = gene_stat_clean_HCT116,
+                       ont = "ALL",
+                       keyType = "SYMBOL",
+                       minGSSize = 3,
+                       maxGSSize = 800,
+                       pvalueCutoff = 0.05,
+                       verbose = TRUE,
+                       OrgDb = org.Hs.eg.db,
+                       pAdjustMethod = "BH")
+
+dotplot(gse_GO_HCT116, showCategory = 6, split = ".sign") + 
+    facet_grid(. ~ .sign, scales = "free") + 
+    theme(axis.text.y = element_text(size = 10)) +
+    ggtitle("GSEA GO ALL: E1A effect in HCT116 (ctrl vs E1A)")
+
+# KEGG
+# SYMBOL → ENTREZ
+mapping_kegg_HCT116 <- mapIds(org.Hs.eg.db,
+                              keys = names(gene_stat_HCT116),
+                              column = "ENTREZID",
+                              keytype = "SYMBOL",
+                              multiVals = "first")
+
+# geneList with ENTREZ ID
+gene_list_entrez_HCT116 <- gene_stat_HCT116
+names(gene_list_entrez_HCT116) <- mapping_kegg_HCT116
+gene_list_entrez_HCT116 <- na.omit(gene_list_entrez_HCT116)
+
+# KEGG GSEA
+gsea_kegg_HCT116 <- gseKEGG(geneList = gene_list_entrez_HCT116,
+                            organism = "hsa",
+                            pvalueCutoff = 0.05,
+                            pAdjustMethod = "BH")
+
+dotplot(gsea_kegg_HCT116, showCategory = 6, split = ".sign") + 
+    facet_grid(. ~ .sign) + 
+    theme(axis.text.y = element_text(size = 10)) +
+    ggtitle("KEGG: E1A effect in HCT116 (ctrl vs E1A)")
+```
+
+When analyzed on 24 samples (the full model, including the resistant line and oxaliplatin treatment), the same pathways (e.g., ribosome biogenesis, extracellular matrix) were also enriched, but had higher p-values (p.adjust ~1e-3 – 1e-5) compared to analysis of HCT116 alone (p.adjust ~5e-08).
+This indicates that the effect of E1A on the transcriptome is attenuated in the presence of additional factors (oxaliplatin resistance, treatment).
+In pure HCT116, the effect of E1A is most pronounced and statistically reliable.
+
+```{r}
+# Preparing geneList for HCT116 (sensitive, ctrl vs E1A)
+gene_stat_TF <- res_E1A_HCT116$stat
+names(gene_stat_TF) <- rownames(res_E1A_HCT116)
+gene_stat_TF <- na.omit(gene_stat_TF)
+gene_stat_TF <- sort(gene_stat_TF, decreasing = TRUE)
+
+# SYMBOL → ENTREZ
+mapping_TF <- mapIds(org.Hs.eg.db,
+                     keys = names(gene_stat_TF),
+                     column = "ENTREZID",
+                     keytype = "SYMBOL",
+                     multiVals = "first")
+
+gene_list_entrez_TF <- gene_stat_TF[!is.na(mapping_TF)]
+names(gene_list_entrez_TF) <- mapping_TF[!is.na(mapping_TF)]
+
+gmt_file <- "TRED_db.gmt"
+file_conn <- file(gmt_file, "w")
+
+for (tf_name in names(TRED)) {
+  target_genes <- TRED[[tf_name]]
+  gmt_line <- paste(tf_name, "TRED_target_genes", paste(target_genes, collapse = "\t"), sep = "\t")
+  writeLines(gmt_line, file_conn)
+}
+close(file_conn)
+
+
+gmt_to_TERM2GENE <- function(gmt_file) {
+  readLines(gmt_file) %>% 
+    strsplit("\t") %>% 
+    lapply(function(x) {
+      term <- x[1]
+      genes <- x[-c(1, 2)]  
+      data.frame(term = term, gene = genes)
+    }) %>% 
+    bind_rows()
+}
+TERM2GENE <- gmt_to_TERM2GENE("TRED_db.gmt")
+
+# GSEA 
+gsea_TRED_HCT116 <- GSEA(geneList = gene_list_entrez_TF,
+                         pvalueCutoff = 0.05,
+                         pAdjustMethod = "none",
+                         TERM2GENE = TERM2GENE)
+
+gsea_TRED_HCT116 <- setReadable(gsea_TRED_HCT116, 'org.Hs.eg.db', keyType = "ENTREZID")
+
+dotplot(gsea_TRED_HCT116, showCategory = 8, split = ".sign") + 
+    facet_grid(. ~ .sign) +
+    ggtitle("TRED: E1A effect in HCT116 (ctrl vs E1A)")
+
+gseaplot2(gsea_TRED_HCT116, geneSetID = 1:3)
+```
+
+
+
+```{r}
+# Leave only resistant HCT116_oxpl_R cells with control (without oxaliplatin)
+keep_R <- colData(dds)$cell_line == "HCT116_oxpl_R" & colData(dds)$condition == "ctrl"
+dds_R <- dds[, keep_R]
+
+design(dds_R) <- ~ e1a_status
+dds_R <- DESeq(dds_R)
+
+res_E1A_R <- results(dds_R, name = "e1a_status_positive_vs_negative")
+summary(res_E1A_R)
+
+# up/down |log2FC| > 1
+up_R <- sum(res_E1A_R$padj < 0.05 & res_E1A_R$log2FoldChange > 1, na.rm = TRUE)
+down_R <- sum(res_E1A_R$padj < 0.05 & res_E1A_R$log2FoldChange < -1, na.rm = TRUE)
+cat("Up-regulated:", up_R, "\n")
+cat("Down-regulated:", down_R, "\n")
+```
+
+
+```{r}
+top_genes_R <- head(order(res_E1A_R$padj), 30)
+
+vsd_R <- vst(dds_R, blind = FALSE)
+top_data_R <- assay(vsd_R)[top_genes_R, ]
+colnames(top_data_R) <- ifelse(colData(dds_R)$e1a_status == "negative", 
+                               "ctrl", "dox+")
+
+pheatmap(top_data_R,
+         scale = "row",
+         main = "Top 30 DEGs: E1A effect in resistant cells (ctrl vs dox+)",
+         fontsize_row = 6,
+         fontsize_col = 8,
+         angle_col = 0,
+         treeheight_row = 50,
+         treeheight_col = 50,
+         border_color = NA)
+```
+
+```{r}
+EnhancedVolcano(res_E1A_R,
+    lab = rownames(res_E1A_R),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    title = 'E1A effect in resistant cells',
+    subtitle = 'HCT116_oxpl_R (ctrl vs dox+)',
+    pCutoff = 0.05,
+    FCcutoff = 1,
+    pointSize = 2.0,
+    labSize = 4.0)
+```
+
+In oxaliplatin-sensitive HCT116 cells, E1A elicits a broader transcriptional response, whereas in resistant HCT116 oxpl-R cells the response is more constrained. TACSTD2 remains mildly induced but to a lower extent in the resistant background, EPHA2 is already highly expressed at baseline in resistant cells, and H2AC18 shows a stronger induction upon doxycycline in the resistant state, suggesting that E1A acts on a pre-rewired chromatin and signaling landscape. Overall, the smaller number of responsive genes in resistant cells indicates reduced transcriptional plasticity to E1A
+
+```{r}
+keep_heatmap <- colData(dds)$condition == "ctrl" & 
+                colData(dds)$cell_line %in% c("HCT116", "HCT116_oxpl_R")
+
+counts_heatmap <- counts(dds)[, keep_heatmap]
+
+coldata_heatmap <- colData(dds)[keep_heatmap, ]
+
+dds_heatmap <- DESeqDataSetFromMatrix(
+    countData = counts_heatmap,
+    colData = coldata_heatmap,
+    design = ~ e1a_status + cell_line   # two factors
+)
+
+# VST 
+vsd_heatmap <- vst(dds_heatmap, blind = FALSE)
+
+top_genes <- head(rownames(res_E1A_HCT116)[order(res_E1A_HCT116$padj)], 30)
+top_data <- assay(vsd_heatmap)[top_genes, ]
+
+colnames(top_data) <- paste0(colData(dds_heatmap)$cell_line, "_", 
+                             ifelse(colData(dds_heatmap)$e1a_status == "negative", "ctrl", "dox+"))
+
+pheatmap(top_data,
+         scale = "row",
+         main = "Top 30 DEGs: E1A effect in sensitive vs resistant cells",
+         fontsize_row = 6,
+         fontsize_col = 8,
+         angle_col = 45,
+         treeheight_row = 50,
+         treeheight_col = 50,
+         border_color = NA)
+```
+```{r}
+dds_ctrl <- dds[, colData(dds)$condition == "ctrl"]
+
+genes_of_interest <- c("TACSTD2", "EPHA2", "H2AC18")
+
+for (gene in genes_of_interest) {
+  ge <- plotCounts(dds_ctrl, gene, intgroup = c("cell_line", "e1a_status"), returnData = TRUE)
+  
+  ge$group <- paste0(ge$cell_line, "\n", ifelse(ge$e1a_status == "negative", "ctrl", "dox+"))
+  
+  p <- ggplot(ge, aes(x = group, y = count, fill = e1a_status)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+    geom_jitter(width = 0.2, size = 3, alpha = 0.8) +
+    scale_fill_manual(values = c("negative" = "lightblue", "positive" = "salmon")) +
+    labs(title = paste("Expression of", gene),
+         x = "", y = "Normalized Counts") +
+    theme_minimal() +
+    theme(legend.position = "none",
+          axis.text.x = element_text(size = 10, angle = 0),
+          axis.text = element_text(size = 10),
+          axis.title = element_text(size = 12, face = "bold"),
+          plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+  
+  print(p)
+}
+```
+
+TACSTD2, EPHA2 and H2AC18 were particularly informative because they reflect different biological layers of the E1A response. TACSTD2 suggests a modest shift in epithelial/cell-surface state, EPHA2 indicates a pre-existing signaling plasticity in oxaliplatin-resistant cells, and H2AC18 points to a strong chromatin-level remodeling response upon doxycycline induction. Together, their behavior suggests that E1A acts on a pre-adapted resistant background rather than on a uniform cellular state.
+
+```{r}
+# GSEA 
+gene_stat_R <- res_E1A_R$stat
+names(gene_stat_R) <- rownames(res_E1A_R)
+gene_stat_R <- na.omit(gene_stat_R)
+gene_stat_R <- sort(gene_stat_R, decreasing = TRUE)
+
+# SYMBOL → ENTREZ (как для чувствительных)
+mapping_R <- mapIds(org.Hs.eg.db,
+                    keys = names(gene_stat_R),
+                    column = "ENTREZID",
+                    keytype = "SYMBOL",
+                    multiVals = "first")
+
+gene_stat_clean_R <- gene_stat_R[!is.na(mapping_R)]
+
+# GSEA GO ALL 
+gse_GO_R <- gseGO(geneList = gene_stat_clean_R,
+                  ont = "ALL",
+                  keyType = "SYMBOL",
+                  minGSSize = 3,
+                  maxGSSize = 800,
+                  pvalueCutoff = 0.05,
+                  verbose = TRUE,
+                  OrgDb = org.Hs.eg.db,
+                  pAdjustMethod = "BH")
+
+dotplot(gse_GO_R, showCategory = 6, split = ".sign") + 
+    facet_grid(. ~ .sign, scales = "free") + 
+    theme(axis.text.y = element_text(size = 8)) +
+    ggtitle("GSEA GO ALL: E1A effect in resistant cells")
+
+# KEGG 
+gene_list_entrez_R <- gene_stat_R
+names(gene_list_entrez_R) <- mapping_R
+gene_list_entrez_R <- na.omit(gene_list_entrez_R)
+
+gsea_kegg_R <- gseKEGG(geneList = gene_list_entrez_R,
+                       organism = "hsa",
+                       pvalueCutoff = 0.05,
+                       pAdjustMethod = "BH")
+
+dotplot(gsea_kegg_R, showCategory = 6, split = ".sign") + 
+    facet_grid(. ~ .sign) + 
+    theme(axis.text.y = element_text(size = 8)) +
+    ggtitle("KEGG: E1A effect in resistant cells")
+```
+
+In resistant cells, E1A retains its ability to suppress ribosomogenesis and rRNA processing with high significance (p.adjust = 1e-05 - 1e-03), but activation of extracellular matrix and differentiation pathways is virtually absent. Instead, weak activation of immune and inflammatory pathways is observed. This indicates a partial, but incomplete, retention of E1A's effect in resistant cells.
+
