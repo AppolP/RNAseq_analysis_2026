@@ -1,0 +1,790 @@
+---
+title: "E1A-induced chemosensitization"
+author: "Elena Kalita"
+date: "2026-05-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = TRUE)
+
+library(DESeq2)
+library(tximport)
+library(ggplot2)
+library(pheatmap)
+library(EnhancedVolcano)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(stringr)
+library(DOSE)
+library(dplyr)
+```
+
+# Aim of analysis
+
+**E1A-induced chemosensitization**
+
+Main question:
+
+> How does E1A expression alter the transcriptional response of XCT116 cells to oxaliplatin?
+
+For this we need interaction contrast:
+
+``` text
+(oxpl_E1A - ctrl_E1A) - (oxpl - ctrl)
+```
+
+That is, we are not simply comparing `oxpl_E1A vs oxpl`, but we are checking whether the response to oxaliplatin has changed in the presence of E1A.
+
+This RMD includes two analyses:
+
+1.  All 24 samples: cell line-corrected model.
+2.  Only sensitive HCT116: ctrl, E1A, oxpl, oxpl_E1A.
+
+# import Salmon quant.sf
+
+```{r salmon-files}
+samples <- list.files("Salmon quant", full.names = TRUE)
+files <- file.path(samples, "quant.sf")
+names(files) <- basename(samples)
+```
+
+```{r tximport}
+tx2gene <- read.csv(gzfile("data/gencode.v47.metadata.HGNC.gz"), sep = "\t", header = FALSE)
+
+txi_gene <- tximport(files, type = "salmon", tx2gene = tx2gene, countsFromAbundance = "no")
+txi_gene_RPK <- txi_gene$counts / txi_gene$length
+txi_gene_TPM <- tximport(files, type = "salmon", tx2gene = tx2gene, countsFromAbundance = "lengthScaledTPM")
+
+txi_counts <- data.frame(txi_gene$counts)
+txi_TPM <- data.frame(txi_gene_TPM$counts)
+
+write.table(txi_counts, file = "raw_counts_all_samples.txt", sep = "\t", row.names = TRUE, quote = FALSE)
+write.csv2(txi_counts, file = "raw_counts_all_samples.csv", row.names = TRUE, quote = FALSE)
+write.csv2(txi_TPM, file = "TPM_all_samples.csv", row.names = TRUE, quote = FALSE)
+```
+
+# Metadata
+
+```{r metadata}
+metadata <- data.frame(
+  full_condition = factor(rep(c("ctrl", "E1A", "oxpl", "oxpl_E1A"), each = 3, times = 2)),
+  condition = factor(rep(c("ctrl", "oxpl"), each = 6, times = 2)),
+  e1a_status = factor(rep(c("negative", "positive"), each = 3, times = 4)),
+  cell_line = factor(rep(c("HCT116", "HCT116_oxpl_R"), each = 12)),
+  stat = factor(rep(c("ctrl", "ctrl_E1A", "oxpl", "oxpl_E1A",
+                      "R_ctrl", "R_ctrl_E1A", "R_oxpl", "R_oxpl_E1A"), each = 3))
+)
+
+rownames(metadata) <- colnames(txi_gene$counts)
+
+metadata$condition <- relevel(metadata$condition, ref = "ctrl")
+metadata$e1a_status <- relevel(metadata$e1a_status, ref = "negative")
+metadata$cell_line <- relevel(metadata$cell_line, ref = "HCT116")
+
+metadata$sample_label <- paste0(metadata$stat, "_rep", rep(1:3, times = 8))
+metadata
+```
+
+# 1. All 24 samples
+
+The full factorial model is used here:
+
+``` text
+~ cell_line * e1a_status * condition
+```
+
+It takes into account the main effects of cell line, E1A, and oxaliplatin,\
+as well as all two- and three-way interactions.\
+The main coefficient e1a_statuspositive.conditionoxpl shows\
+how E1A modifies the response to oxaliplatin in HCT116.
+
+## DESeq2 model: 24 samples
+
+```{r deseq-24}
+dds_24 <- DESeqDataSetFromTximport(
+  txi = txi_gene,
+  colData = metadata,
+  design = ~ cell_line * e1a_status * condition
+)
+
+dds_24 <- DESeq(dds_24)
+dds_24 <- dds_24[rowSums(counts(dds_24)) > 0, ]
+
+resultsNames(dds_24)
+```
+
+## Main contrast: E1A changes oxaliplatin response, 24 samples
+
+```{r result-24}
+res_24 <- results(dds_24, name = "e1a_statuspositive.conditionoxpl", alpha = 0.05)
+summary(res_24)
+
+res_24_df <- as.data.frame(res_24)
+res_24_df$gene <- rownames(res_24_df)
+
+res_24_clean <- res_24_df[!is.na(res_24_df$padj) & !is.na(res_24_df$log2FoldChange), ]
+res_24_sig <- res_24_clean[res_24_clean$padj < 0.05 & abs(res_24_clean$log2FoldChange) > 1, ]
+res_24_up <- res_24_sig[res_24_sig$log2FoldChange > 1, ]
+res_24_down <- res_24_sig[res_24_sig$log2FoldChange < -1, ]
+
+metrics_24 <- data.frame(
+  analysis = "24_samples",
+  contrast = "E1A_changes_oxaliplatin_response",
+  formula = "~ cell_line * e1a_status * condition",
+  n_total_nonzero = nrow(res_24_df),
+  n_with_pvalue = sum(!is.na(res_24_df$pvalue)),
+  n_with_padj = sum(!is.na(res_24_df$padj)),
+  n_sig_padj_0_05_absLFC_1 = nrow(res_24_sig),
+  n_up = nrow(res_24_up),
+  n_down = nrow(res_24_down)
+)
+
+metrics_24
+```
+
+```{r save-result-24}
+write.csv(res_24_df, "E1A_chemosens_24_all_DESeq2_results.csv", row.names = FALSE)
+write.csv(res_24_sig, "E1A_chemosens_24_significant_DEG.csv", row.names = FALSE)
+write.csv(metrics_24, "E1A_chemosens_24_metrics.csv", row.names = FALSE)
+```
+
+## Top DEG: 24 samples
+
+```{r top-deg-24}
+top30_24 <- head(res_24_clean[order(res_24_clean$padj), ], 30)
+top30_24[, c("gene", "log2FoldChange", "pvalue", "padj")]
+
+write.csv(top30_24, "E1A_chemosens_24_top30_DEG.csv", row.names = FALSE)
+```
+
+## MA-plot: 24 samples
+
+```{r ma-plot-24}
+plotMA(res_24, main = "24 samples: E1A changes oxaliplatin response")
+```
+
+## VST and heatmap top-30: 24 samples
+
+```{r heatmap-24, fig.width=11, fig.height=8}
+vsd_24 <- vst(dds_24, blind = FALSE)
+
+mat_24 <- assay(vsd_24)[top30_24$gene, ]
+colnames(mat_24) <- metadata$sample_label
+
+annotation_24 <- as.data.frame(colData(dds_24)[, c("cell_line", "condition", "e1a_status", "full_condition", "stat")])
+rownames(annotation_24) <- metadata$sample_label
+
+pheatmap(
+  mat_24,
+  scale = "row",
+  annotation_col = annotation_24,
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  fontsize_row = 8,
+  fontsize_col = 7,
+  main = "Top 30 DEG: E1A changes oxaliplatin response, 24 samples"
+)
+```
+
+## Volcano plot: 24 samples
+
+```{r volcano-24, fig.width=9, fig.height=8}
+EnhancedVolcano(
+  res_24,
+  lab = rownames(res_24),
+  x = "log2FoldChange",
+  y = "pvalue",
+  pCutoffCol = "padj",
+  title = "Full DESeq model: E1A changes oxaliplatin response",
+  FCcutoff = 1,
+  pCutoff = 0.05,
+  pointSize = 2.5,
+  labSize = 4
+)
+```
+
+## Boxplots for up- and down-regulated genes: 24 samples
+
+We take the top up- and down-regulated genes from the DESeq2 result for the main interaction contrast. Here, `up` denotes positive `log2FoldChange`, `down` denotes negative `log2FoldChange`.
+
+```{r boxplot-genes-24}
+boxplot_up_24 <- head(res_24_up[order(res_24_up$padj), ], 6)
+boxplot_down_24 <- head(res_24_down[order(res_24_down$padj), ], 6)
+
+boxplot_genes_24 <- c(boxplot_up_24$gene, boxplot_down_24$gene)
+boxplot_direction_24 <- c(rep("up", nrow(boxplot_up_24)), rep("down", nrow(boxplot_down_24)))
+
+boxplot_table_24 <- data.frame(
+  gene = boxplot_genes_24,
+  direction = boxplot_direction_24
+)
+
+boxplot_table_24
+
+write.csv(boxplot_table_24, "E1A_chemosens_24_boxplot_genes.csv", row.names = FALSE)
+```
+
+```{r boxplots-24, fig.width=10, fig.height=5}
+dir.create("boxplots_E1A_chemosens_24", showWarnings = FALSE)
+
+for (i in seq_along(boxplot_genes_24)) {
+  gene <- boxplot_genes_24[i]
+  direction <- boxplot_direction_24[i]
+  
+  ge <- plotCounts(dds_24, gene = gene, intgroup = "stat", returnData = TRUE)
+  
+  p <- ggplot(ge, aes(x = stat, y = count, fill = stat)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+    geom_jitter(width = 0.2, size = 3, alpha = 0.8) +
+    scale_fill_brewer(palette = "Set2") +
+    labs(
+      title = paste("24 samples:", direction, "gene", gene),
+      x = "",
+      y = "Normalized counts"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+    )
+  
+  print(p)
+  
+  safe_gene <- gsub("[^A-Za-z0-9_.-]", "_", gene)
+  ggsave(
+    filename = file.path("boxplots_E1A_chemosens_24", paste0(direction, "_", safe_gene, "_boxplot.png")),
+    plot = p,
+    width = 10,
+    height = 5,
+    dpi = 300
+  )
+}
+```
+
+## GSEA ranking: 24 samples
+
+For GSEA we use Wald test statistics (`stat`).
+
+```{r gsea-ranking-24}
+gene_stat_24 <- res_24$stat
+names(gene_stat_24) <- rownames(res_24)
+gene_stat_24 <- na.omit(gene_stat_24)
+gene_stat_24 <- sort(gene_stat_24, decreasing = TRUE)
+
+head(gene_stat_24)
+```
+
+## GSEA GO ALL: 24 samples
+
+```{r gsea-go-all-24, fig.width=11, fig.height=8}
+gse_GO_24_ALL <- gseGO(
+  geneList = gene_stat_24,
+  ont = "ALL",
+  keyType = "SYMBOL",
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  verbose = TRUE,
+  OrgDb = org.Hs.eg.db,
+  pAdjustMethod = "BH"
+)
+
+write.csv(
+  as.data.frame(gse_GO_24_ALL),
+  "E1A_chemosens_24_GSEA_GO_ALL.csv",
+  row.names = FALSE
+)
+
+dotplot(gse_GO_24_ALL, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  labs(title = "GSEA GO ALL, 24 samples") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+## GSEA GO BP: 24 samples
+
+```{r gsea-go-bp-24, fig.width=11, fig.height=8}
+gse_GO_24_BP <- gseGO(
+  geneList = gene_stat_24,
+  ont = "BP",
+  keyType = "SYMBOL",
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  verbose = TRUE,
+  OrgDb = org.Hs.eg.db,
+  pAdjustMethod = "BH"
+)
+
+write.csv(as.data.frame(gse_GO_24_BP), "E1A_chemosens_24_GSEA_GO_BP.csv", row.names = FALSE)
+
+dotplot(gse_GO_24_BP, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  labs(title = "GSEA GO BP, 24 samples") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+## GSEA GO CC: 24 samples
+
+```{r gsea-go-cc-24, fig.width=11, fig.height=7}
+gse_GO_24_CC <- gseGO(
+  geneList = gene_stat_24,
+  ont = "CC",
+  keyType = "SYMBOL",
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  verbose = TRUE,
+  OrgDb = org.Hs.eg.db,
+  pAdjustMethod = "BH"
+)
+
+write.csv(as.data.frame(gse_GO_24_CC), "E1A_chemosens_24_GSEA_GO_CC.csv", row.names = FALSE)
+
+dotplot(gse_GO_24_CC, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  labs(title = "GSEA GO CC, 24 samples") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+## GSEA GO MF: 24 samples
+
+```{r gsea-go-mf-24, fig.width=11, fig.height=7}
+gse_GO_24_MF <- gseGO(
+  geneList = gene_stat_24,
+  ont = "MF",
+  keyType = "SYMBOL",
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  verbose = TRUE,
+  OrgDb = org.Hs.eg.db,
+  pAdjustMethod = "BH"
+)
+
+write.csv(as.data.frame(gse_GO_24_MF), "E1A_chemosens_24_GSEA_GO_MF.csv", row.names = FALSE)
+
+dotplot(gse_GO_24_MF, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  labs(title = "GSEA GO MF, 24 samples") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+## GSEA KEGG: 24 samples
+
+```{r gsea-kegg-24, fig.width=10, fig.height=6}
+mapping_24 <- mapIds(
+  org.Hs.eg.db,
+  keys = names(gene_stat_24),
+  column = "ENTREZID",
+  keytype = "SYMBOL",
+  multiVals = "first"
+)
+
+gene_list_entrez_24 <- gene_stat_24
+names(gene_list_entrez_24) <- mapping_24
+
+gene_list_entrez_24 <- gene_list_entrez_24[!is.na(names(gene_list_entrez_24))]
+gene_list_entrez_24 <- gene_list_entrez_24[!duplicated(names(gene_list_entrez_24))]
+gene_list_entrez_24 <- sort(gene_list_entrez_24, decreasing = TRUE)
+
+gsea_kegg_24 <- gseKEGG(
+  geneList = gene_list_entrez_24,
+  organism = "hsa",
+  keyType = "ncbi-geneid",
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH"
+)
+
+gsea_kegg_24 <- setReadable(gsea_kegg_24, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+
+write.csv(as.data.frame(gsea_kegg_24), "E1A_chemosens_24_GSEA_KEGG.csv", row.names = FALSE)
+
+dotplot(gsea_kegg_24, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  labs(title = "GSEA KEGG 24 samples") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+# 2. Only sensitive HCT116 cells
+
+Now we leave only 12 HCT116 samples:
+
+``` text
+ctrl, E1A, oxpl, oxpl_E1A
+```
+
+Model:
+
+``` text
+~ e1a_status * condition
+```
+
+Main contrast:
+
+``` text
+(oxpl_E1A - ctrl_E1A) - (oxpl - ctrl)
+```
+
+## Subset HCT116
+
+```{r subset-hct116}
+metadata_HCT116 <- metadata[metadata$cell_line == "HCT116", ]
+metadata_HCT116 <- droplevels(metadata_HCT116)
+
+samples_HCT116 <- rownames(metadata_HCT116)
+
+txi_HCT116 <- txi_gene
+txi_HCT116$counts <- txi_gene$counts[, samples_HCT116]
+txi_HCT116$abundance <- txi_gene$abundance[, samples_HCT116]
+txi_HCT116$length <- txi_gene$length[, samples_HCT116]
+
+metadata_HCT116$condition <- relevel(metadata_HCT116$condition, ref = "ctrl")
+metadata_HCT116$e1a_status <- relevel(metadata_HCT116$e1a_status, ref = "negative")
+metadata_HCT116$sample_label <- paste0(metadata_HCT116$stat, "_rep", rep(1:3, times = 4))
+
+metadata_HCT116
+```
+
+## DESeq2 model: HCT116 only
+
+```{r deseq-hct116}
+dds_HCT116 <- DESeqDataSetFromTximport(
+  txi = txi_HCT116,
+  colData = metadata_HCT116,
+  design = ~ e1a_status * condition
+)
+
+dds_HCT116 <- DESeq(dds_HCT116)
+dds_HCT116 <- dds_HCT116[rowSums(counts(dds_HCT116)) > 0, ]
+
+resultsNames(dds_HCT116)
+```
+
+## Main contrast: E1A changes oxaliplatin response, HCT116 only
+
+```{r result-hct116}
+res_HCT116 <- results(dds_HCT116, name = "e1a_statuspositive.conditionoxpl", alpha = 0.05)
+summary(res_HCT116)
+
+res_HCT116_df <- as.data.frame(res_HCT116)
+res_HCT116_df$gene <- rownames(res_HCT116_df)
+
+res_HCT116_clean <- res_HCT116_df[!is.na(res_HCT116_df$padj) & !is.na(res_HCT116_df$log2FoldChange), ]
+res_HCT116_sig <- res_HCT116_clean[res_HCT116_clean$padj < 0.05 & abs(res_HCT116_clean$log2FoldChange) > 1, ]
+res_HCT116_up <- res_HCT116_sig[res_HCT116_sig$log2FoldChange > 1, ]
+res_HCT116_down <- res_HCT116_sig[res_HCT116_sig$log2FoldChange < -1, ]
+
+metrics_HCT116 <- data.frame(
+  analysis = "HCT116_only",
+  contrast = "E1A_changes_oxaliplatin_response",
+  formula = "~ e1a_status * condition",
+  n_total_nonzero = nrow(res_HCT116_df),
+  n_with_pvalue = sum(!is.na(res_HCT116_df$pvalue)),
+  n_with_padj = sum(!is.na(res_HCT116_df$padj)),
+  n_sig_padj_0_05_absLFC_1 = nrow(res_HCT116_sig),
+  n_up = nrow(res_HCT116_up),
+  n_down = nrow(res_HCT116_down)
+)
+
+metrics_HCT116
+```
+
+```{r save-result-hct116}
+write.csv(res_HCT116_df, "E1A_chemosens_HCT116_all_DESeq2_results.csv", row.names = FALSE)
+write.csv(res_HCT116_sig, "E1A_chemosens_HCT116_significant_DEG.csv", row.names = FALSE)
+write.csv(metrics_HCT116, "E1A_chemosens_HCT116_metrics.csv", row.names = FALSE)
+```
+
+## Top DEG: HCT116 only
+
+```{r top-deg-hct116}
+top30_HCT116 <- head(res_HCT116_clean[order(res_HCT116_clean$padj), ], 30)
+top30_HCT116[, c("gene", "log2FoldChange", "pvalue", "padj")]
+
+write.csv(top30_HCT116, "E1A_chemosens_HCT116_top30_DEG.csv", row.names = FALSE)
+```
+
+## MA-plot: HCT116 only
+
+```{r ma-plot-hct116}
+plotMA(res_HCT116, main = "HCT116: E1A changes oxaliplatin response")
+```
+
+## VST and heatmap top-30: HCT116 only
+
+```{r heatmap-hct116, fig.width=9, fig.height=8}
+vsd_HCT116 <- vst(dds_HCT116, blind = FALSE)
+
+mat_HCT116 <- assay(vsd_HCT116)[top30_HCT116$gene, ]
+colnames(mat_HCT116) <- metadata_HCT116$sample_label
+
+annotation_HCT116 <- as.data.frame(colData(dds_HCT116)[, c("condition", "e1a_status", "full_condition", "stat")])
+rownames(annotation_HCT116) <- metadata_HCT116$sample_label
+
+pheatmap(
+  mat_HCT116,
+  scale = "row",
+  annotation_col = annotation_HCT116,
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  fontsize_row = 8,
+  fontsize_col = 8,
+  main = "Top 30 DEG: E1A changes oxaliplatin response, HCT116 sensitive only"
+)
+```
+
+## Volcano plot: HCT116 only
+
+```{r volcano-hct116, fig.width=9, fig.height=8}
+EnhancedVolcano(
+  res_HCT116,
+  lab = rownames(res_HCT116),
+  x = "log2FoldChange",
+  y = "pvalue",
+  pCutoffCol = "padj",
+  title = "E1A-induced chemosensitization",
+  FCcutoff = 1,
+  pCutoff = 0.05,
+  pointSize = 2.5,
+  labSize = 4
+)
+```
+
+## Boxplots for up- and down-regulated genes: HCT116 only
+
+We take the top up- and down-regulated genes from the DESeq2 result for interaction contrast only in sensitive HCT116.
+
+```{r boxplot-genes-hct116}
+boxplot_up_HCT116 <- res_HCT116_up[order(res_HCT116_up$padj), ]
+boxplot_down_HCT116 <- res_HCT116_down[order(res_HCT116_down$padj), ]
+
+boxplot_genes_HCT116 <- c(boxplot_up_HCT116$gene, boxplot_down_HCT116$gene)
+boxplot_direction_HCT116 <- c(
+  rep("up", nrow(boxplot_up_HCT116)),
+  rep("down", nrow(boxplot_down_HCT116))
+)
+
+boxplot_table_HCT116 <- data.frame(
+  gene = boxplot_genes_HCT116,
+  direction = boxplot_direction_HCT116
+)
+
+boxplot_table_HCT116
+write.csv(boxplot_table_HCT116, "E1A_chemosens_HCT116_boxplot_genes.csv", row.names = FALSE)
+```
+
+```{r boxplots-hct116, fig.width=8, fig.height=5}
+dir.create("boxplots_E1A_chemosens_HCT116", showWarnings = FALSE)
+
+for (i in seq_along(boxplot_genes_HCT116)) {
+  gene <- boxplot_genes_HCT116[i]
+  direction <- boxplot_direction_HCT116[i]
+  
+  ge <- plotCounts(dds_HCT116, gene = gene, intgroup = "stat", returnData = TRUE)
+  
+  p <- ggplot(ge, aes(x = stat, y = count, fill = stat)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+    geom_jitter(width = 0.2, size = 3, alpha = 0.8) +
+    scale_fill_brewer(palette = "Set2") +
+    labs(
+      title = paste("HCT116:", direction, "gene", gene),
+      x = "",
+      y = "Normalized Counts"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.text.x = element_text(size = 11, angle = 45, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+    )
+  
+  print(p)
+  
+  safe_gene <- gsub("[^A-Za-z0-9_.-]", "_", gene)
+  ggsave(
+    filename = file.path("boxplots_E1A_chemosens_HCT116", paste0(direction, "_", safe_gene, "_boxplot.png")),
+    plot = p,
+    width = 8,
+    height = 5,
+    dpi = 300
+  )
+}
+```
+
+## GSEA ranking: HCT116 only
+
+```{r gsea-ranking-hct116}
+gene_stat_HCT116 <- res_HCT116$stat
+names(gene_stat_HCT116) <- rownames(res_HCT116)
+gene_stat_HCT116 <- na.omit(gene_stat_HCT116)
+gene_stat_HCT116 <- sort(gene_stat_HCT116, decreasing = TRUE)
+
+head(gene_stat_HCT116)
+```
+
+## GSEA GO ALL: HCT116 only
+
+```{r gsea-go-all-hct116, fig.width=11, fig.height=9}
+gse_GO_HCT116_ALL <- gseGO(
+  geneList = gene_stat_HCT116,
+  ont = "ALL",
+  keyType = "SYMBOL",
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  verbose = TRUE,
+  OrgDb = org.Hs.eg.db,
+  pAdjustMethod = "BH"
+)
+
+write.csv(as.data.frame(gse_GO_HCT116_ALL), "E1A_chemosens_HCT116_GSEA_GO_ALL.csv", row.names = FALSE)
+
+dotplot(gse_GO_HCT116_ALL, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  labs(title = "GSEA GO ALL: HCT116 sensitive only") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+## GSEA GO BP: HCT116 only
+
+```{r gsea-go-bp-hct116, fig.width=11, fig.height=9}
+gse_GO_HCT116_BP <- gseGO(
+  geneList = gene_stat_HCT116,
+  ont = "BP",
+  keyType = "SYMBOL",
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  verbose = TRUE,
+  OrgDb = org.Hs.eg.db,
+  pAdjustMethod = "BH"
+)
+
+write.csv(as.data.frame(gse_GO_HCT116_BP), "E1A_chemosens_HCT116_GSEA_GO_BP.csv", row.names = FALSE)
+
+dotplot(gse_GO_HCT116_BP, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  labs(title = "GSEA GO BP: HCT116 sensitive only") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+## GSEA GO CC: HCT116 only
+
+```{r gsea-go-cc-hct116, fig.width=10, fig.height=6}
+gse_GO_HCT116_CC <- gseGO(
+  geneList = gene_stat_HCT116,
+  ont = "CC",
+  keyType = "SYMBOL",
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  verbose = TRUE,
+  OrgDb = org.Hs.eg.db,
+  pAdjustMethod = "BH"
+)
+
+write.csv(as.data.frame(gse_GO_HCT116_CC), "E1A_chemosens_HCT116_GSEA_GO_CC.csv", row.names = FALSE)
+
+dotplot(gse_GO_HCT116_CC, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  labs(title = "GSEA GO CC: HCT116 sensitive only") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+## GSEA GO MF: HCT116 only
+
+```{r gsea-go-mf-hct116, fig.width=10, fig.height=7}
+gse_GO_HCT116_MF <- gseGO(
+  geneList = gene_stat_HCT116,
+  ont = "MF",
+  keyType = "SYMBOL",
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  verbose = TRUE,
+  OrgDb = org.Hs.eg.db,
+  pAdjustMethod = "BH"
+)
+
+write.csv(as.data.frame(gse_GO_HCT116_MF), "E1A_chemosens_HCT116_GSEA_GO_MF.csv", row.names = FALSE)
+
+dotplot(gse_GO_HCT116_MF, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  labs(title = "GSEA GO MF: HCT116 sensitive only") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+## GSEA KEGG: HCT116 only
+
+```{r gsea-kegg-hct116, fig.width=10, fig.height=6}
+mapping_HCT116 <- mapIds(
+  org.Hs.eg.db,
+  keys = names(gene_stat_HCT116),
+  column = "ENTREZID",
+  keytype = "SYMBOL",
+  multiVals = "first"
+)
+
+gene_list_entrez_HCT116 <- gene_stat_HCT116
+names(gene_list_entrez_HCT116) <- mapping_HCT116
+
+gene_list_entrez_HCT116 <- gene_list_entrez_HCT116[!is.na(names(gene_list_entrez_HCT116))]
+gene_list_entrez_HCT116 <- gene_list_entrez_HCT116[!duplicated(names(gene_list_entrez_HCT116))]
+gene_list_entrez_HCT116 <- sort(gene_list_entrez_HCT116, decreasing = TRUE)
+
+gsea_kegg_HCT116 <- gseKEGG(
+  geneList = gene_list_entrez_HCT116,
+  organism = "hsa",
+  keyType = "ncbi-geneid",
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH"
+)
+
+gsea_kegg_HCT116 <- setReadable(gsea_kegg_HCT116, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+
+write.csv(as.data.frame(gsea_kegg_HCT116), "E1A_chemosens_HCT116_GSEA_KEGG.csv", row.names = FALSE)
+
+dotplot(gsea_kegg_HCT116, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  labs(title = "GSEA GO KEGG: HCT116 sensitive only") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+# General table of metrics
+
+```{r final-metrics}
+metrics_all <- rbind(metrics_24, metrics_HCT116)
+metrics_all
+
+write.csv(metrics_all, "E1A_chemosens_all_metrics.csv", row.names = FALSE)
+```
+
+# 
