@@ -10,8 +10,8 @@ The work was divided into four parts:
 
 | Part | Description | Design | Report |
 |------|-------------|--------|--------|
-| **I** | Oxaliplatin‑resistant vs sensitive cells (baseline) | HCT116_oxpl_R vs HCT116 (no E1A, no oxaliplatin) | [HTML](results/BI-PROJECT-TRANSCRIPTOME-6-samples.html) |
-| **II** | General E1A effect | All 24 samples, contrast on doxycycline effect | [HTML](results/BI-PROJECT-TRANSCRIPTOME-E1A-effects-for-github.html) |
+| **I** | Oxaliplatin‑resistant vs sensitive cells (baseline) | HCT116_oxpl_R vs HCT116 (no E1A, no oxaliplatin) | [HTML](https://htmlpreview.github.io/?https://raw.githubusercontent.com/AppolP/RNAseq_analysis_2026/main/results/BI-PROJECT-TRANSCRIPTOME-6-samples.html) |
+| **II** | General E1A effect | All 24 samples, contrast on doxycycline effect | [HTML](https://htmlpreview.github.io/?https://raw.githubusercontent.com/AppolP/RNAseq_analysis_2026/main/results/BI-PROJECT-TRANSCRIPTOME-E1A-effects-for-github.html) |
 | **III** | E1A‑induced chemosensitisation | All 24 samples, contrast on oxaliplatin and doxycycline effect | |
 | **IV** | E1A in resistant cells | Full DESeq2 model with all factors (e1a_status * condition * cell_line) |  |
 
