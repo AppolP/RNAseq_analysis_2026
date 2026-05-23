@@ -100,6 +100,49 @@ PCA shows clear separation between resistant and sensitive samples.
 
 ---
 
+## Part IV. Comparison of E1A‑induced chemosensitization between resistant and sensitive cells
+
+**Experimental design**  
+- **Samples**: all 24 samples from full factorial design (2 cell lines × 2 E1A status × 2 oxaliplatin treatments × 3 replicates).  
+- **Contrast**: triple interaction term `e1a_statuspositive.conditionoxpl.cell_lineHCT116_oxpl_R`  
+  → asks: *“Does the effect of E1A on oxaliplatin response differ between resistant (HCT116_oxpl_R) and sensitive (HCT116) cells?”*  
+  Positive log2FC = stronger (or less suppressive) effect of E1A in resistant cells; negative log2FC = weaker or opposite effect.
+
+**Results**  
+
+**Differential expression (triple interaction)**  
+- Threshold: `padj < 0.1` (to capture biologically meaningful differences)  
+- Total significant genes: **29**  
+  - Upregulated (LFC > 0, *stronger effect in resistant*): 26 genes  
+  - Downregulated (LFC < 0, *weaker/opposite effect in resistant*): 3 genes  
+
+**Top‑upregulated genes (stronger effect in resistant)**  
+`PKDCC` (LFC = 5.03), `KLK11` (3.91), `CDT1` (1.95), `E2F1` (1.91), `ARC` (1.76), `NRGN` (1.64), `H2AX` (1.54), `TICRR` (1.51), `MCM5` (1.49), `MYBL2` (1.48), `SULF2` (1.44), `TONSL` (1.23), `TREX1` (~1.22), `DUSP1` (1.2), `OAS3` (1.2), `KIFC1` (1.19), `MCM7` (1.01)  
+
+**Top‑downregulated genes (weaker/opposite effect in resistant)**  
+`MYH4` (-29.13), `NSUN5P1` (-24.17), `ITGB7` (-3.66)  
+
+**GSEA (GO BP, CC, MF)**  
+- All significant GO terms (n = 237) showed **negative NES** (suppressed in resistant cells compared to sensitive on the background of E1A+oxaliplatin).  
+- **Main suppressed processes** (representative terms):  
+  - Ribonucleoprotein complex biogenesis  
+  - Ribosome biogenesis  
+  - Ribosomal large subunit biogenesis  
+  - Preribosome  
+  - RNA processing / splicing / nucleocytoplasmic transport  
+
+→ **Interpretation**: In resistant cells, E1A+oxaliplatin leads to **stronger suppression** of ribosome synthesis and RNA processing than in sensitive cells. This global decrease in translational capacity may contribute to chemosensitization by limiting the ability of resistant cells to mount a protective protein response.
+
+**KEGG ORA (on 20 significant genes with padj < 0.05)**  
+- No significant KEGG pathways were enriched (likely due to small gene set size and functional heterogeneity).
+
+**Conclusion**  
+- E1A on top of oxaliplatin **divergently affects** resistant vs sensitive cells:  
+  - Upregulation of cell‑cycle/DNA‑repair genes (E2F1, CDT1, MCMs, H2AX, TONSL) — possibly reflecting replicative stress.  
+  - Simultaneous **suppression of ribosome biogenesis and RNA processing** (GSEA) — a metabolic shutdown.  
+- This combination (replication stress + reduced protein synthesis) may render previously resistant cells **vulnerable to further damage**, suggesting a mechanism by which E1A could overcome oxaliplatin resistance.
+
+
 ## Conclusions
 
 1. Oxaliplatin‑resistant cells already have a distinct transcriptomic profile (2091 DEGs) under baseline conditions, with activated stress‑response and metabolic pathways.
