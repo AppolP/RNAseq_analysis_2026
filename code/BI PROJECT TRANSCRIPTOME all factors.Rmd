@@ -1,0 +1,776 @@
+---
+title: "BI transcriptome all factors"
+author: "Parfenova Polina"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+install_if_missing <- function(pkg, github_repo = NULL) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    message("The package '", pkg, "' was not found. Trying unstallation...")
+    
+
+    if (!is.null(github_repo)) {
+      tryCatch({
+        if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
+        remotes::install_github(github_repo)
+        message("Successfully unstall within the GitHub: ", pkg)
+        return(invisible(TRUE))
+      }, error = function(e) {
+        message("GitHub failed: ", e$message)
+      })
+    }
+    
+
+    tryCatch({
+      if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+      BiocManager::install(pkg, update = FALSE, ask = FALSE)
+      if (requireNamespace(pkg, quietly = TRUE)) {
+        message("Successfully unstall within the BiocManager: ", pkg)
+        return(invisible(TRUE))
+      }
+    }, error = function(e) {
+      message("BiocManager failed: ", e$message)
+    })
+    
+
+    tryCatch({
+      install.packages(pkg)
+      if (requireNamespace(pkg, quietly = TRUE)) {
+        message("Successfully unstall within the CRAN: ", pkg)
+        return(invisible(TRUE))
+      }
+    }, error = function(e) {
+      stop("Could not install the package '", pkg)
+    })
+  } else {
+    message("Пакет '", pkg, "' уже установлен.")
+  }
+  invisible(TRUE)
+}
+
+
+packages <- unique(c(
+  "DESeq2", "ggplot2", "vsn", "pheatmap", "ggrepel", "dplyr",
+  "tximport", "EnhancedVolcano", "reshape2", "clusterProfiler",
+  "org.Hs.eg.db", "enrichplot", "DOSE", "tftargets", "fgsea",
+  "msigdbr", "ReactomePA", "decoupleR", "dorothea"
+))
+
+
+github_map <- list(
+  "tftargets" = "saezlab/tftargets"
+)
+
+
+for (pkg in packages) {
+  repo <- github_map[[pkg]] 
+  install_if_missing(pkg, github_repo = repo)
+}
+
+
+lapply(packages, library, character.only = TRUE)
+
+
+```
+
+## IMPORTING AND PREPROCESSING DATA
+
+```{r}
+# List Salmon output
+samples <- list.files("D:/BI/Project/Salmonquant/Salmon quant", full.names = TRUE)
+files <- file.path(samples, "quant.sf")
+names(files) <- basename(samples)
+```
+
+Import file and count genes
+
+```{r}
+hgnc_url <- "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_47/GRCh37_mapping/gencode.v47lift37.metadata.HGNC.gz"
+temp_file <- tempfile(fileext = ".gz")
+download.file(hgnc_url, destfile = temp_file, mode = "wb")
+
+tx2gene_raw <- read.csv(gzfile(temp_file), sep = "\t", header = FALSE)
+```
+
+```{r}
+tx2gene <- tx2gene_raw[, c("V1", "V2")]
+
+txi_gene <- tximport(files, type = "salmon", tx2gene = tx2gene, countsFromAbundance="no")
+txi_gene_RPK <- txi_gene$counts/txi_gene$length
+txi_gene_TPM <-  tximport(files, type = "salmon", tx2gene = tx2gene, countsFromAbundance = "lengthScaledTPM")
+
+txi_counts <- data.frame(txi_gene$counts)
+txi_TPM <- data.frame(txi_gene_TPM$counts)
+write.table(txi_counts, file = "raw_counts_all_samples.txt", sep = "\t", row.names = TRUE, quote = FALSE)
+write.csv2(txi_counts, file = "raw_counts_all_samples.csv", row.names = TRUE, quote = FALSE)
+write.csv2(txi_TPM, file = "TPM_all_samples.csv", row.names = TRUE, quote = FALSE)
+```
+
+Form metadata with design of the experiment
+
+```{r metadata, echo=FALSE}
+metadata <- data.frame(
+    full_condition = factor(rep(c("ctrl", "E1A", "oxpl", "oxpl_E1A"), each=3,times=2)),
+    condition = factor(rep(c("ctrl", "oxpl"), each=6,times=2)),
+    e1a_status = factor(rep(c("negative", "positive"), each=3,times=4)),
+    cell_line = factor(rep(c("HCT116", "HCT116_oxpl_R"), each=12)),
+    stat = factor(rep(c("ctrl", "ctrl_E1A", "oxpl", "oxpl_E1A", "R_ctrl", "R_ctrl_E1A", "R_oxpl", "R_oxpl_E1A"),each=3)))
+
+rownames(metadata) <- colnames(txi_gene$counts)
+```
+
+## BUILDING COMMON MODEL
+
+```{r deseq, echo=FALSE}
+
+dds <- DESeqDataSetFromTximport(
+    txi = txi_gene,
+    colData = metadata,
+    design = ~ e1a_status * condition * cell_line # <- all interactions
+)
+
+
+dds <- DESeq(dds) 
+dds <- dds[rowSums(counts(dds)) > 0, ]
+results <- results(dds, alpha=0.05)
+resultsNames(dds)
+
+resOrdered <- results[order(results$pvalue),]
+summary(results)
+
+results_df <- as.data.frame(results)
+
+res_clean <- results[!is.na(results$padj) & !is.na(results$log2FoldChange), ]
+
+res_sig <- res_clean[abs(res_clean$log2FoldChange) > 1 & res_clean$padj < 0.05, ]
+res_sig_df <- as.data.frame(res_sig)
+
+```
+
+```{r}
+plotMA(results)
+
+```
+
+```{r}
+plotDispEsts(dds)
+```
+
+We check the correlation of the samples: sample 47 is clearly knocked out
+
+```{r}
+cor_matrix <- round(cor(txi_gene$abundance, method = 'pearson'),2)
+#colnames(cor_matrix) <- metadata$group
+#rownames(cor_matrix) <- metadata$group
+library(reshape2)
+melted_cormat <- melt(cor_matrix)
+
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value), trace="none") + 
+  geom_tile() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+It got better without it, but still the correlation between the repetitions is not always high (sample 42 and 45 are also slightly out of place)
+
+```{r}
+cor_matrix <- round(cor(txi_gene$abundance[,-19], method = 'pearson'),2)
+#colnames(cor_matrix) <- metadata$group
+#rownames(cor_matrix) <- metadata$group
+library(reshape2)
+melted_cormat <- melt(cor_matrix)
+
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value), trace="none") + 
+  geom_tile() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+```
+
+```{r, echo=FALSE}
+vsd <- vst(dds, blind=FALSE)
+
+plotPCA(vsd, intgroup = c("condition", "cell_line","e1a_status")) 
+plotPCA(vsd, intgroup = c("condition", "cell_line"))
+plotPCA(vsd, intgroup = c("e1a_status"))
+```
+
+```{r, echo=FALSE}
+rld <- rlogTransformation(dds)
+meanSdPlot(assay(rld), ranks = F)
+```
+
+```{r, echo=FALSE}
+plotPCA(rld, intgroup = c("cell_line","full_condition"))
+```
+
+```{r}
+names <- as.character(colData(dds)$stat)
+```
+
+#### Top 30 genes - for a complete model without contrasts, the picture is not very bright, but there is an interesting cluster of genes that decrease in platinum-resistant ones, while E1A cancels this effect.
+
+```{r heatmap, echo=FALSE}
+top_genes <- head(order(results$padj), 30)
+top_data <- assay(vsd)[top_genes, ]
+colnames(top_data) <- names
+pheatmap(top_data, scale="row")
+```
+
+```{r}
+EnhancedVolcano(results,
+    lab = rownames(results),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoffCol = "padj",
+    title = 'Full Deseq model',
+    FCcutoff = 1, pCutoff = 0.05,
+    pointSize = 3.0,
+    labSize = 6.0)
+```
+
+```{r}
+markers <- c("DUSP1", "NSUN5P1", "RN7SK", "NDUFB7", "NDUFB5", "NDUFA2","AKR1C2","AKR1C3","AHR","CDKN1C", "GPX4")
+
+# Checking which genes are really there
+present <- markers[markers %in% rownames(dds)]
+if(length(present) == 0) stop("Not a single marker was found in dds")
+gene <- present[1]
+
+ge <- plotCounts(dds, gene, intgroup = "stat", returnData=TRUE)
+ggplot(ge, aes(x = stat, y = count, fill = stat)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +   # boxplot without standard emissions
+  geom_jitter(width = 0.2, size = 3, alpha = 0.8) + # points with a small spread on the X-axis
+  scale_fill_brewer(palette = "Set2") +             # a beautiful palette of colors
+  labs(title = paste("Expression of", gene),
+       x = "",
+       y = "Normalized Counts") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14, face = "bold"),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5)) 
+```
+
+Functional analysis using the deseq stat metric:
+
+```{r}
+res_e1a <- results
+gene_stat <- res_e1a$stat
+names(gene_stat) <- rownames(res_e1a)
+gene_stat <- na.omit(gene_stat)
+gene_stat <- sort(gene_stat, decreasing = TRUE)
+
+gene_list_entrez_stat <- gene_stat
+mapping <- mapIds(org.Hs.eg.db,
+                 keys = names(gene_stat),
+                 column = "ENTREZID",
+                 keytype = "SYMBOL",
+                 multiVals = "first") 
+
+names(gene_list_entrez_stat) <- mapping
+
+gene_list_entrez_stat <- na.omit(gene_list_entrez_stat)
+gene_list_entrez_stat <- gene_list_entrez_stat[!is.na(names(gene_list_entrez_stat))]
+
+```
+
+```{r}
+#по stat
+gse_GO <- gseGO(geneList=gene_stat, 
+             ont ="ALL", 
+             keyType = "SYMBOL", 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "BH")
+
+dotplot(gse_GO, showCategory=8, split=".sign") + facet_grid(.~.sign)
+
+simplified_result <- clusterProfiler::simplify(gse_GO,
+                                               cutoff = 0.7,
+                                               by = "p.adjust",
+                                               select_fun = min)
+dotplot(simplified_result, showCategory = 8, split = ".sign") + facet_grid(. ~ .sign)
+p <- dotplot(gse_GO, showCategory=8, split=".sign") + facet_grid(.~.sign)
+p
+
+ggsave("gsea_go_all_dotplot.png", plot = p, width = 10, height = 12, dpi = 300)
+```
+
+\
+
+```{r}
+#по stat
+gsea_kegg <- gseKEGG(
+    geneList = gene_list_entrez_stat,
+    organism = "hsa",  ,  
+    keyType = "ncbi-geneid",
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH"
+)
+
+gsea_kegg <- setReadable(gsea_kegg, 'org.Hs.eg.db', keyType = "ENTREZID")
+
+p <- dotplot(gsea_kegg, showCategory=8, split=".sign") + facet_grid(.~.sign)
+p
+
+
+ggsave("gsea_kegg_dotplot.png", plot = p, width = 10, height = 12, dpi = 300)
+
+```
+
+Functional analysis - enrichment by transcription factors
+
+```{r}
+library(tftargets)
+str(TRED)
+#TRED$TP53
+
+gmt_file <- "TRED_db.gmt"
+file_conn <- file(gmt_file, "w")
+
+for (tf_name in names(TRED)) {
+  target_genes <- TRED[[tf_name]]
+  # Removing possible NA and empty values
+  target_genes <- target_genes[!is.na(target_genes) & target_genes != ""]
+  if (length(target_genes) == 0) next
+  
+  gmt_line <- paste(
+    tf_name,                  # The term (TF name)
+    "TRED_target_genes",      # description (not used, but needed for GMT format)
+    paste(target_genes, collapse = "\t"),  # tabulated genes
+    sep = "\t"
+  )
+  writeLines(gmt_line, file_conn)
+}
+close(file_conn)
+
+library(clusterProfiler)
+library(tidyverse)
+
+gmt_to_TERM2GENE <- function(gmt_file) {
+  readLines(gmt_file) %>% 
+    strsplit("\t") %>% 
+    lapply(function(x) {
+      term <- x[1]
+      genes <- x[-c(1, 2)]  
+      data.frame(term = term, gene = genes)
+    }) %>% 
+    bind_rows()
+}
+TERM2GENE <- gmt_to_TERM2GENE("TRED_db.gmt")
+
+
+head(TERM2GENE)
+
+gsea_TRED <- GSEA(
+  geneList = gene_list_entrez_stat,  
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "none",
+  TERM2GENE = TERM2GENE
+)
+gsea_TRED <- setReadable(gsea_TRED, 'org.Hs.eg.db', keyType = "ENTREZID")
+# Visualization
+dotplot(gsea_TRED, showCategory=8, split=".sign") + facet_grid(.~.sign)
+gseaplot2(gsea_TRED, geneSetID = 1:3)
+
+DEG_PT <- as.data.frame(results)
+```
+
+## Moving on to subtask 3
+
+#### A comparison of chemosensitization of sensitive and resistant cells with E1A expression is a complete DESEQ model that takes into account all the factors
+
+```{r}
+resultsNames(dds)
+```
+
+Taking into account all three factors from the general model, we calculate the coefficient of triple interaction, that is, mathematically (E1A effect in res+oxpl) - (E1A effect in sens+oxpl)
+
+\~ e1a_status \* condition \* cell_line or e1a_status**positive** .condition**oxpl**.cell_line**HCT116_oxpl_R**
+
+that is, each factoring level is based on its reference value
+
+-   for e1a_status, the reference is positive
+
+-   for condition - oxpl (oxaliplatin treatment)
+
+-   for cell_line - HCT116_oxpl_R (cells with resistance to oxaliplatin)
+
+```{r}
+res_int <- results(dds, name = "e1a_statuspositive.conditionoxpl.cell_lineHCT116_oxpl_R")
+
+
+res_int <- res_int[order(res_int$pvalue), ]
+summary(res_int)
+```
+
+```{r}
+
+sig_genes <- res_int[!is.na(res_int$padj) & res_int$padj < 0.05 & abs(res_int$log2FoldChange) > 1, ]
+
+# If there are none, use padj < 0.1
+if (nrow(sig_genes) == 0) {
+  sig_genes <- res_int[!is.na(res_int$padj) & res_int$padj < 0.1, ]
+  cat("Using padj < 0.1 (", nrow(sig_genes), "genes)\n")
+} else {
+  cat("Using padj < 0.05 (", nrow(sig_genes), "genes)\n")
+}
+
+df_sig <- data.frame(
+  Gene = rownames(sig_genes),
+  log2FoldChange = sig_genes$log2FoldChange,
+  pvalue = sig_genes$pvalue,
+  padj = sig_genes$padj,
+  Direction = ifelse(sig_genes$log2FoldChange > 0, "up", "down")
+)
+
+# Sort, for example, by descending absolute log2FC
+df_sig <- df_sig[order(abs(df_sig$log2FoldChange), decreasing = TRUE), ]
+
+df_dir <- df_sig[order(df_sig$Direction, df_sig$Gene), ]
+df_dir$log2FC_rounded <- round(df_dir$log2FoldChange, 2)
+
+cat(paste0(df_dir$Gene, " (", df_dir$Direction, ") log2FC = ", df_dir$log2FC_rounded, collapse = "\n"))
+
+cat(paste0(df_dir$log2FoldChange, collapse = "\n"))
+```
+
+```{r}
+p <- EnhancedVolcano(res_int,
+                     lab = rownames(res_int),
+                     x = 'log2FoldChange',
+                     y = 'padj',
+                     title = 'E1A effect difference (resistant vs sensitive)',
+                     subtitle = NULL,
+                     caption = NULL,
+                     FCcutoff = 1,
+                     pCutoff = 0.1,
+                     labSize = 2.6,
+                     axisLabSize = 8,
+                     titleLabSize = 14,
+                     subtitleLabSize = 8,
+                     captionLabSize = 8,
+                     colAlpha = 0.8,
+                     pointSize = 1.0,
+                     legendLabSize = 10,
+                     legendIconSize = 3.0,
+                     legendPosition = "right",
+                     drawConnectors = TRUE)
+
+p <- p +
+  theme(text = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 12),
+        axis.title = element_text(size = 10),
+        axis.text = element_text(size = 10)) +
+  guides(color = guide_legend(override.aes = list(size = 1.5))) +
+  theme(aspect.ratio = 1)
+
+print(p)
+ggsave("volcano_plot.png", plot = p, width = 8, height = 8, dpi = 600)
+
+```
+
+On vulcanoplast, we see negative expression of the MTH4, NSUN5P1, DNAAF4-CCPG1 genes, that is, in oxaliplatin-resistant cells, the inclusion of E1A causes a lower increase (or a greater decrease) in expression than in sensitive cells
+
+PKDCC, GTF2IP4, and E2F1 are genes in which the effect of E1A on oxaliplatin in resistant cells differs in the direction of enhancement (greater rise or lower fall) compared to sensitive cells.
+
+```{r}
+
+#We take all significant genes (padj<0.1)
+sig_all <- res_int[!is.na(res_int$padj) & res_int$padj < 0.05, ]
+sig_all <- sig_all[order(abs(sig_all$log2FoldChange), decreasing = TRUE), ]
+genes <- rownames(sig_all)
+
+# Expression matrix - DO NOT CHANGE column names
+norm_counts <- counts(dds, normalized = TRUE)
+mat_log <- log2(norm_counts[genes, ] + 1)   # column names = rownames(colData(dds))
+
+anno_df <- data.frame(
+  cell_line = colData(dds)$cell_line,
+  condition = colData(dds)$condition,
+  e1a_status = colData(dds)$e1a_status,
+  row.names = rownames(colData(dds))
+)
+
+# We get the levels from announce (they should already be correct)
+lv_cell <- levels(anno_df$cell_line)
+lv_cond <- levels(anno_df$condition)
+lv_e1a <- levels(anno_df$e1a_status)
+
+# We set the colors in the same order as the levels.
+ann_colors <- list(
+  cell_line = setNames(c("#7CCD7C", "#CD8500"), lv_cell),
+  condition = setNames(c("#AB82FF", "#CD6090"), lv_cond),
+  e1a_status = setNames(c("#CCCCCC", "#CC9999"), lv_e1a)
+)
+# Make sure that the length of the colors matches the length of the levels.
+stopifnot(length(lv_cell) == length(ann_colors$cell_line))
+stopifnot(length(lv_cond) == length(ann_colors$condition))
+stopifnot(length(lv_e1a) == length(ann_colors$e1a_status))
+
+# We build a heat map by setting column labels via labels_col
+heatmap <- pheatmap(mat_log, 
+         scale = "row",
+         annotation_col = anno_df,
+         annotation_colors = ann_colors,
+         labels_col = colData(dds)$stat,
+         angle_col = 45,           
+         fontsize_col = 8,         
+         cellheight = 10,
+         cellwidth = 12,
+         main = paste("All", length(genes), "significant genes (padj<0.05)\nDifferential E1A effect"))
+
+print(heatmap)
+ggsave("heatmap.png", plot = heatmap, width = 14, height = 10, dpi = 300)
+```
+
+```{r}
+total_genes <- sum(!is.na(res_int$padj))  # genes after low counts filtering (24750)
+sig_genes <- sum(res_int$padj < 0.05, na.rm = TRUE)
+up_genes <- sum(res_int$log2FoldChange > 0 & res_int$padj < 0.05, na.rm = TRUE)
+down_genes <- sum(res_int$log2FoldChange < 0 & res_int$padj < 0.05, na.rm = TRUE)
+
+cat("=== Quantitative metrics for triple interaction ===\n")
+cat("Total genes tested:", total_genes, "\n")
+cat("Significant genes (padj < 0.05):", sig_genes, "\n")
+cat("  Up (LFC > 0):", up_genes, "\n")
+cat("  Down (LFC < 0):", down_genes, "\n")
+```
+
+```{r}
+# 1. We take statistics from the triple interaction
+geneList <- res_int$stat
+names(geneList) <- rownames(res_int)
+geneList <- geneList[!is.na(geneList)]
+
+# 2. Adding micro-noise to break ties (optional, but neat)
+set.seed(123)
+geneList <- geneList + rnorm(length(geneList), 0, 1e-8)
+
+# 3. Sort in descending order
+geneList <- sort(geneList, decreasing = TRUE)
+
+# 4. Converting characters to Entrez ID
+geneList_entrez <- geneList
+names(geneList_entrez) <- mapIds(org.Hs.eg.db,
+                                 keys = names(geneList),
+                                 column = "ENTREZID",
+                                 keytype = "SYMBOL",
+                                 multiVals = "first")
+# Deleting NA
+geneList_entrez <- geneList_entrez[!is.na(geneList_entrez)]
+# Making sure that the names are also not NA
+geneList_entrez <- geneList_entrez[!is.na(names(geneList_entrez))]
+
+# 5.Sorting again (conversion could have changed the order)
+geneList_entrez <- sort(geneList_entrez, decreasing = TRUE)
+
+# 6.Launching GSEA GO
+gse_go <- gseGO(geneList = geneList_entrez,
+                OrgDb = org.Hs.eg.db,
+                ont = "ALL",
+                keyType = "ENTREZID",
+                minGSSize = 10,
+                maxGSSize = 500,
+                pvalueCutoff = 0.05,
+                verbose = TRUE)
+
+gse_bp <- gseGO(geneList = geneList_entrez,
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                keyType = "ENTREZID",
+                minGSSize = 10,
+                maxGSSize = 500,
+                pvalueCutoff = 0.05,
+                verbose = TRUE)
+
+gse_cc <- gseGO(geneList = geneList_entrez,
+                OrgDb = org.Hs.eg.db,
+                ont = "CC",
+                keyType = "ENTREZID",
+                minGSSize = 10,
+                maxGSSize = 500,
+                pvalueCutoff = 0.05,
+                verbose = TRUE)
+
+gse_mf <- gseGO(geneList = geneList_entrez,
+                OrgDb = org.Hs.eg.db,
+                ont = "MF",
+                keyType = "ENTREZID",
+                minGSSize = 10,
+                maxGSSize = 500,
+                pvalueCutoff = 0.05,
+                verbose = TRUE)
+```
+
+```{r}
+plot_gsea_split <- function(gsea_obj, ont_name, show = 10, width = 10, height = 9) {
+  if (is.null(gsea_obj) || nrow(gsea_obj) == 0) {
+    message("No significant terms for ", ont_name)
+    return(NULL)
+  }
+  
+  n_pos <- sum(gsea_obj$NES > 0)
+  n_neg <- sum(gsea_obj$NES < 0)
+  message(ont_name, ": ", n_pos, " activated, ", n_neg, " suppressed")
+  
+  p <- dotplot(gsea_obj, showCategory = show, split = ".sign", label_format = 40) + 
+         facet_grid(. ~ .sign, drop = FALSE) +
+         ggtitle(paste("GSEA GO – Triple interaction (resistant vs sensitive) -", ont_name)) +
+         theme(plot.title = element_text(hjust = 0.5, size = 12),
+               axis.text.y = element_text(size = 10),
+               strip.text = element_text(size = 10))
+  
+  print(p)
+  ggsave(paste0("gsea_go_triple_", tolower(ont_name), ".png"), plot = p, width = width, height = height, dpi = 600)
+}
+
+plot_gsea_split(gse_go, "ALL", show = 15)
+plot_gsea_split(gse_bp, "BP", show = 15)
+plot_gsea_split(gse_cc, "CC", show = 15)
+plot_gsea_split(gse_mf, "MF", show = 15)
+```
+
+```{r}
+# list of significant genes (symbols)
+sig_genes <- rownames(res_int[!is.na(res_int$padj) & res_int$padj < 0.05, ])
+
+# Entrez ID
+sig_genes_entrez <- mapIds(org.Hs.eg.db, keys = sig_genes, keytype = "SYMBOL", column = "ENTREZID", multiVals = "first")
+sig_genes_entrez <- na.omit(sig_genes_entrez)
+
+# ORA по KEGG
+kegg_ora <- enrichKEGG(gene = sig_genes_entrez, organism = 'hsa', pvalueCutoff = 0.05)
+
+# Visualization
+if (nrow(kegg_ora) > 0) {
+  dotplot(kegg_ora, showCategory = 15) + ggtitle("KEGG ORA (Metabolic Pathways)")
+} else {
+  cat("No significant KEGG pathways found for ORA.\n")
+}
+```
+
+Although we have 17 significantly up-regulated genes under activated E1A, they do not seem to be involved in the same pathways. It does not mean that we cant count on them tho. According to the graphs above E1A seems to cause global decrease of synthetic activity in resistant cells, which makes them more vulnerable to chemotherapy.
+
+```{r}
+table(sign(gse_go$NES))
+```
+
+On pathways
+
+```{r}
+dorothea_regulons <- dorothea::dorothea_hs %>%
+    filter(confidence %in% c("A", "B", "C")) 
+
+head(dorothea_regulons)
+```
+
+```{r}
+vsd_matrix <- assay(vst(dds, blind = FALSE))
+colnames(vsd_matrix) <- rownames(colData(dds))
+vsd_matrix <- vsd_matrix[rowSums(vsd_matrix) > 0, ]
+
+tf_activity <- decoupleR::run_mlm(
+    mat = vsd_matrix,
+    network = dorothea_regulons,
+    .source = "tf",
+    .target = "target",
+    .mor = "mor"
+)
+
+tf_wide <- tf_activity %>%
+    dplyr::select(source, condition, score) %>%
+    tidyr::pivot_wider(names_from = source, values_from = score)
+```
+
+```{r}
+
+heatmap_matrix <- as.matrix(tf_wide[, -1])
+rownames(heatmap_matrix) <- tf_wide$condition
+
+
+heatmap_matrix_t <- t(heatmap_matrix)
+
+colnames(heatmap_matrix_t) <- rownames(metadata)
+
+top_tf_vars <- names(sort(apply(heatmap_matrix_t, 1, var), decreasing = TRUE))[1:20]
+
+heatmap_matrix_t_top <- heatmap_matrix_t[top_tf_vars, , drop = FALSE]
+
+annotation_col <- data.frame(
+  cell_line = metadata$cell_line,
+  condition = metadata$condition,
+  e1a_status = metadata$e1a_status,
+  row.names = rownames(metadata)
+)
+
+ann_colors <- list(
+  cell_line = setNames(c("#7CCD7C", "#CD8500"), unique(metadata$cell_line)),
+  condition = setNames(c("#AB82FF", "#CD6090"), unique(metadata$condition)),
+  e1a_status = setNames(c("#CCCCCC", "#CC9999"), unique(metadata$e1a_status))
+)
+
+pheatmap(heatmap_matrix_t_top,
+         scale = "row",
+         annotation_col = annotation_col,
+         annotation_colors = ann_colors,
+         labels_col = metadata$stat,  
+         cluster_cols = FALSE,         
+         main = "TF activity (mlm method, top 20 TFs)",
+         angle_col = 45,
+         fontsize_col = 8,
+         filename = "TF_activity_heatmap.png",
+         width = 12,
+         height = 8,
+         dpi = 300)
+```
+
+```{r}
+genes_of_interest <- c("ITGB7", "MYH4", "NSUN5P1", "ARC", "CDT1", "DUSP1", 
+                       "E2F1", "H2AX", "KIFC1", "KLK11", "MCM5", "MCM7", 
+                       "MYBL2", "NRGN", "OAS3", "PKDCC", "SULF2", "TICRR", 
+                       "TONSL", "TREX1")
+
+
+present <- genes_of_interest[genes_of_interest %in% rownames(dds)]
+if(length(present) == 0) stop("None of the genes found")
+cat("Found", length(present), "genes out of", length(genes_of_interest), "\n")
+```
+
+```{r}
+norm_counts <- counts(dds, normalized = TRUE)
+
+counts_subset <- norm_counts[present, , drop = FALSE]
+
+
+df_long <- as.data.frame(t(counts_subset))
+df_long$sample <- rownames(df_long)
+df_long <- merge(df_long, metadata[, "stat", drop = FALSE], by.x = "sample", by.y = 0)
+df_long <- df_long %>%
+  pivot_longer(cols = all_of(present), names_to = "gene", values_to = "expression")
+
+df_long$stat <- factor(df_long$stat, levels = c("ctrl", "ctrl_E1A", "oxpl", "oxpl_E1A",
+                                                "R_ctrl", "R_ctrl_E1A", "R_oxpl", "R_oxpl_E1A"))
+
+p <- ggplot(df_long, aes(x = stat, y = expression, fill = stat)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.2, size = 0.8, alpha = 0.6) +
+  facet_wrap(~ gene, scales = "free_y", ncol = 3) +   # 3 колонки
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        strip.text = element_text(face = "bold"),
+        legend.position = "none") +
+  labs(x = "", y = "Normalized expression")
+
+print(p)
+ggsave("boxplots_selected_genes.png", plot = p, width = 14, height = 15, dpi = 600)
+```
+
+In the context of the triple interaction between resistant cells with E1A and oxaliplatin and sensitive cells with both E1A, we observe a decrease in ribosome biogenesis and RNA processing in the resistant cells. This is due to the negative NES (Gene Set Enrichment Analysis) for terms related to ribosomal biogenesis, RNA processing, etc., which is consistent with the overall pattern of gene regulation in these cells.
+
+Since there is a list of genes that are regulated by E1A that are mainly involved in replication and repair, the general picture is that E1A activates genes associated with proliferation and repair (E2F1, CDT1, MCM, TONS, H2AX) in resistant cells, but suppresses the synthesis of ribosomes and overall translational activity.
+
+This combination can create replicative stress and increase the dependence of cells on repair systems, which can potentially be used in therapy. This also explains why resistant cells become more sensitive to additional damage (for example, oxaliplatin) - they synthesize fewer ribosomes, cannot quickly increase protein synthesis for protection, but at the same time, intensively replicate DNA, leading to the accumulation of errors and apoptosis.
