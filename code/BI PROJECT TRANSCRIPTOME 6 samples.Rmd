@@ -6,6 +6,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 library(DESeq2)
@@ -25,7 +26,6 @@ library(GenomicFeatures)
 library(org.Hs.eg.db)
 
 
-library(clusterProfiler)
 library(enrichplot)     
 require(DOSE)
 
@@ -35,16 +35,20 @@ library(tidyverse)
 ```
 
 ```{r}
-# List Salmon output
-samples <- list.files("Salmon quant/Salmon quant", full.names = FALSE)
-files <- file.path("Salmon quant/Salmon quant", samples, "quant.sf")
-names(files) <- samples
+source("R/functions.R")
+```
 
+
+```{r}
+# List Salmon output
+samples <- list.files("../Salmon quant/Salmon quant", full.names = FALSE)
+files <- file.path("../Salmon quant/Salmon quant", samples, "quant.sf")
+names(files) <- samples
 file.exists(files)
 ```
 ```{r}
 # Loading GTF
-txdb <- makeTxDbFromGFF("data/gencode.v47.annotation.gtf.gz")
+txdb <- makeTxDbFromGFF("../data/gencode.v47.annotation.gtf.gz")
 k <- keys(txdb, keytype = "TXNAME")
 
 # TXNAME → ENSG
@@ -68,13 +72,13 @@ colnames(tx2gene) <- c("TXNAME", "GENEID")
 tx2gene <- na.omit(tx2gene)
 
 # Save
-write.csv(tx2gene, "data/tx2gene_symbols.csv", row.names = FALSE)
+write.csv(tx2gene, "../data/tx2gene_symbols.csv", row.names = FALSE)
 ```
 
 
 Import files and count genes:
 ```{r}
-tx2gene <- read.csv("data/tx2gene_symbols.csv")
+tx2gene <- read.csv("../data/tx2gene_symbols.csv")
 
 txi_gene <- tximport(files, type = "salmon", tx2gene = tx2gene, countsFromAbundance="no")
 txi_gene_RPK <- txi_gene$counts/txi_gene$length
@@ -142,10 +146,9 @@ plotDispEsts(dds)
 The red line flows smoothly through the main cloud of points, and the majority of the points lie not too far from the line. This confirms that the dispersion model has been constructed correctly and that the DESeq2 results are reliable.
 
 
-Проверяем корреляцию образцов: образец 47 явно выбивается
 ```{r}
-cor_matrix <- round(cor(txi_gene$abundance, method = 'pearson'),2)
-melted_cormat <- melt(cor_matrix)
+cor_matrix <- round(cor(txi_gene$abundance, method = 'pearson'), 2)
+melted_cormat <- reshape2::melt(cor_matrix)
 
 ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value), trace="none") + 
   geom_tile() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
@@ -168,16 +171,15 @@ meanSdPlot(assay(rld), ranks = F)
 
 VST/rlog normalization successfully stabilized the variance, as confirmed by the diagnostic plot
 
-```{r}
-names <- as.character(colData(dds)$stat)
-```
-
 
 ```{r heatmap, echo=FALSE}
-top_genes <- head(order(results$padj), 30)
-top_data <- assay(vsd)[top_genes, ]
-colnames(top_data) <- names
-pheatmap(top_data, scale="row")
+plot_heatmap(
+  res = results,
+  vsd = vsd,
+  col_labels = as.character(colData(dds)$cell_line),
+  n_top = 30,
+  title = "Top 30 DEGs: resistant vs sensitive HCT116 cells"
+)
 ```
 
 The heatmap of the top 30 DEGs visualizes the expression patterns of the most significant genes. Hierarchical clustering clearly separated the samples into two groups, and the genes into clusters with similar expression profiles.
@@ -193,6 +195,11 @@ EnhancedVolcano(results,
     pointSize = 3.0,
     labSize = 6.0)
 ```
+
+```{r}
+plot_volcano(results, title = "DESeq model: resistant vs sensitive HCT116 cells")
+```
+
 
 The volcano plot combines statistical significance (–log10 padj) and the magnitude of change (log2FC). Using it, we identified genes that not only underwent substantial changes but did so reliably
 
@@ -240,28 +247,14 @@ gene_list_entrez_stat <- gene_list_entrez_stat[!is.na(names(gene_list_entrez_sta
 
 
 ```{r}
-#stat
-gse_GO <- gseGO(geneList=gene_stat, 
-             ont ="ALL", 
-             keyType = "SYMBOL", 
-             minGSSize = 3, 
-             maxGSSize = 800, 
-             pvalueCutoff = 0.05, 
-             verbose = TRUE, 
-             OrgDb = org.Hs.eg.db, 
-             pAdjustMethod = "BH")
+# GSEA GO
+gsea_results <- run_gsea_go(gene_stat, title_prefix = "Full model")
 
-dotplot(gse_GO, showCategory=8, split=".sign") + facet_grid(.~.sign)
+print(gsea_results$p1)
+print(gsea_results$p2)
 
-simplified_result <- clusterProfiler::simplify(gse_GO,
-                                                   cutoff = 0.7,
-                                                   by = "p.adjust",
-                                                   select_fun = min)
-
-dotplot(simplified_result, showCategory=8, split=".sign") + facet_grid(.~.sign)
-p <- dotplot(gse_GO, showCategory=8, split=".sign") + facet_grid(.~.sign)
-p
 ```
+
 
 Activated in resistant cells are pathways of energy metabolism (oxidative phosphorylation, the respiratory chain) and redox homeostasis (genes of the AKR1C and NDUF families, and the AHR regulator).
 Suppressed are DNA repair, chromosome organization, and the cell cycle.
@@ -269,72 +262,26 @@ This fully supports the hypothesis that resistant cells remodel their metabolism
 
 ```{r}
 # stat
-gsea_kegg <- gseKEGG(
-    geneList = gene_list_entrez_stat,
-    organism = "hsa",  ,  
-    keyType = "ncbi-geneid",
-    pvalueCutoff = 0.05,
-    pAdjustMethod = "BH"
-)
+# KEGG
+kegg_results <- run_gsea_kegg(gene_list_entrez_stat, title_prefix = "Full model")
 
-gsea_kegg <- setReadable(gsea_kegg, 'org.Hs.eg.db', keyType = "ENTREZID")
+print(kegg_results$plot)
 
-p <- dotplot(gsea_kegg, showCategory=8, split=".sign") + facet_grid(.~.sign)
-p
 
 ```
 
 Even under control conditions (in the absence of oxaliplatin), resistant HCT116_oxpl_R cells differ from sensitive cells through the activation of pathways involved in energy metabolism, ribosome biogenesis, and adhesion, as well as the suppression of splicing, mRNA quality control, and chromatin remodeling. This basal difference may underlie their heightened resistance to oxaliplatin.
 
 Functional Analysis — Transcription Factor Enrichment
+
 ```{r}
+# TRED
+tred_results <- run_tred_gsea(gene_list_entrez_stat, title_prefix = "Full model")
 
-
-gmt_file <- "TRED_db.gmt"
-file_conn <- file(gmt_file, "w")
-
-for (tf_name in names(TRED)) {
-  target_genes <- TRED[[tf_name]]
-  gmt_line <- paste(
-    tf_name,                  
-    "TRED_target_genes",      
-    paste(target_genes, collapse = "\t"),  
-    sep = "\t"
-  )
-  
-  writeLines(gmt_line, file_conn)
-}
-
-close(file_conn)
-
-
-gmt_to_TERM2GENE <- function(gmt_file) {
-  readLines(gmt_file) %>% 
-    strsplit("\t") %>% 
-    lapply(function(x) {
-      term <- x[1]
-      genes <- x[-c(1, 2)]  
-      data.frame(term = term, gene = genes)
-    }) %>% 
-    bind_rows()
-}
-TERM2GENE <- gmt_to_TERM2GENE("TRED_db.gmt")
-
-
-head(TERM2GENE)
-
-gsea_TRED <- GSEA(
-  geneList = gene_list_entrez_stat,  
-  pvalueCutoff = 0.05,
-  pAdjustMethod = "none",
-  TERM2GENE = TERM2GENE
-)
-gsea_TRED <- setReadable(gsea_TRED, 'org.Hs.eg.db', keyType = "ENTREZID")
-
-dotplot(gsea_TRED, showCategory=8, split=".sign") + facet_grid(.~.sign)
-gseaplot2(gsea_TRED, geneSetID = 1:3)
-
-DEG_PT <- as.data.frame(results)
+print(tred_results$dotplot)
+print(tred_results$gseaplot)
 ```
+
+
 In resistant HCT116_oxpl_R cells, even under basal conditions, a sustained activation is observed in transcription factors associated with stress and proliferation: AP-1 (FOS, JUN, JUND), EGR1, SMAD1, RARA, SP1, and TP53. Concurrently, E2F4 (which may relieve cell cycle repression) and E2F2 (possibly in a compensatory manner) are suppressed. This transcriptional profile reflects the cells' adaptation to the conditions under which resistance developed—specifically, enhanced stress tolerance, altered signaling, and modified proliferative potential. It may underlie their ability to survive exposure to oxaliplatin and explain why E1A elicits a much weaker transcriptional response in these cells compared to the sensitive cell line
 
