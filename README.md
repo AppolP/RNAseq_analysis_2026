@@ -9,11 +9,192 @@ To identify transcriptomic markers and biological pathways associated with oxali
 The work was divided into four parts:
 
 | Part | Description | Design | Report |
-|------------------|--------------------|------------------|------------------|
+|------------------|-------------------|------------------|------------------|
 | **I** | Oxaliplatin‑resistant vs sensitive cells (baseline) | HCT116_oxpl_R vs HCT116 (no E1A, no oxaliplatin) | [HTML](https://htmlpreview.github.io/?https://raw.githubusercontent.com/AppolP/RNAseq_analysis_2026/main/results/BI-PROJECT-TRANSCRIPTOME-6-samples.html) |
 | **II** | General E1A effect | All 24 samples, contrast on doxycycline effect | [HTML](https://htmlpreview.github.io/?https://raw.githubusercontent.com/AppolP/RNAseq_analysis_2026/main/results/BI-PROJECT-TRANSCRIPTOME-E1A-effects-for-github.html) |
 | **III** | E1A‑induced chemosensitisation | All 24 samples and HCT116 sensitive-only subset; interaction contrast for E1A effect on oxaliplatin response | [HTML](https://htmlpreview.github.io/?https://raw.githubusercontent.com/AppolP/RNAseq_analysis_2026/main/results/E1A_chemosensitization_en.html) |
 | **IV** | E1A in resistant cells | Full DESeq2 model with all factors (e1a_status \* condition \* cell_line) | [HTML](https://htmlpreview.github.io/?https://raw.githubusercontent.com/AppolP/RNAseq_analysis_2026/main/results/BI-PROJECT-TRANSCRIPTOME-allfactors.html) |
+
+------------------------------------------------------------------------
+
+## Reproducibility and running the analysis
+
+### Software requirements
+
+The analysis was performed in **R / RStudio** using R Markdown reports.\
+To reproduce the results, install the following software:
+
+-   R, recommended version: **R 4.3 or newer**
+
+-   RStudio
+
+-   Git
+
+The main R and Bioconductor packages used in the project are:
+
+``` r
+# CRAN packages
+install.packages(c( "tidyverse", "ggplot2", "pheatmap", "EnhancedVolcano", "RColorBrewer", "ggrepel" ))
+
+# Bioconductor 
+packages if (!requireNamespace("BiocManager", quietly = TRUE)) { install.packages("BiocManager") }
+
+BiocManager::install(c( "tximport", "DESeq2", "clusterProfiler", "org.Hs.eg.db", "AnnotationDbi", "GenomicFeatures", "pathview", "enrichplot" ))
+```
+
+For transcription factor target enrichment, the following package is also required:
+
+``` r
+install.packages("remotes") 
+remotes::install_github("slowkow/tftargets") 
+```
+
+Exact package versions can be checked in R by running:
+
+``` r
+sessionInfo() 
+```
+
+------------------------------------------------------------------------
+
+### Repository structure
+
+```         
+RNAseq_analysis_2026/ 
+├── README.md 
+├── code/ 
+│   ├── BI PROJECT TRANSCRIPTOME 6 samples.Rmd 
+│   ├── BI PROJECT TRANSCRIPTOME E1A effects for github.Rmd 
+│   ├── E1A_chemosensitization_en.Rmd 
+│   └── BI PROJECT TRANSCRIPTOME allfactors.Rmd 
+├── R/ 
+│   └── functions.R 
+├── data/ 
+│   └── gencode.v47.annotation.gtf.gz 
+├── results/ 
+│   ├── BI-PROJECT-TRANSCRIPTOME-6-samples.html 
+│   ├── BI-PROJECT-TRANSCRIPTOME-E1A-effects-for-github.html 
+│   ├── E1A_chemosensitization_en.html 
+│   └── BI-PROJECT-TRANSCRIPTOME-allfactors.html 
+└── salmon_quant_24/     
+    └── Salmon quant/         
+        └── sample folders with quant.sf files 
+```
+
+The `results/` folder contains already rendered HTML reports.\
+The `code/` folder contains R Markdown files used to reproduce the analyses.\
+The `R/functions.R` script contains reusable helper functions for plotting and enrichment analysis.
+
+### Input data
+
+The project uses RNA-seq data from the GEO dataset **GSE304295** and Salmon transcript quantification files (`quant.sf`).
+
+**Important note:** Salmon quantification files are **not included in this repository** at the request of the scientific supervisor, because part of the dataset is still associated with unpublished research. Therefore, the repository contains the analysis code and rendered HTML reports, but not the full set of input quantification files required to rerun the complete workflow from Salmon outputs.
+
+Expected input files:
+
+-   Salmon output folders with `quant.sf` files for each sample
+
+-   `data/gencode.v47.annotation.gtf.gz`
+
+------------------------------------------------------------------------
+
+### How to run the analysis
+
+1.  Clone the repository:
+
+``` bash
+git clone https://github.com/AppolP/RNAseq_analysis_2026.git 
+cd RNAseq_analysis_2026 
+```
+
+2.  Open the project in RStudio.
+
+3.  Check that the required input data are available in the expected folders.
+
+4.  Install required R packages.
+
+5.  Open the required R Markdown file from the `code/` folder and knit it to HTML.
+
+The reports correspond to the following project parts:
+
+| Part | R Markdown file | Output HTML |
+|------------------------|------------------------|------------------------|
+| I. Baseline resistant vs sensitive cells | `code/BI PROJECT TRANSCRIPTOME 6 samples.Rmd` | `results/BI-PROJECT-TRANSCRIPTOME-6-samples.html` |
+| II\. General E1A effect | `code/BI PROJECT TRANSCRIPTOME E1A effects for github.Rmd` | `results/BI-PROJECT-TRANSCRIPTOME-E1A-effects-for-github.html` |
+| III\. E1A-induced chemosensitisation | `code/E1A_chemosensitization_en.Rmd` | `results/E1A_chemosensitization_en.html` |
+| IV\. E1A effect in resistant vs sensitive cells | `code/BI PROJECT TRANSCRIPTOME allfactors.Rmd` | `results/BI-PROJECT-TRANSCRIPTOME-allfactors.html` |
+
+The recommended running order is:
+
+1.  Part I - baseline resistant vs sensitive comparison
+
+2.  Part II - general E1A effect
+
+3.  Part III - E1A-induced chemosensitisation
+
+4.  Part IV - comparison of E1A-mediated effects between sensitive and resistant cells
+
+However, each R Markdown file can also be run independently if the required input files are available.
+
+------------------------------------------------------------------------
+
+### Approximate runtime and memory requirements
+
+Approximate runtime depends on the machine and whether all packages are already installed.
+
+Recommended hardware:
+
+-   RAM: **at least 8 GB**, preferably **16 GB**
+
+-   CPU: standard laptop or desktop CPU is sufficient
+
+-   Disk space: several GB for Salmon quantification files and generated reports
+
+Approximate runtime:
+
+| Analysis part                  | Approximate runtime                 |
+|--------------------------------|-------------------------------------|
+| 6-sample baseline analysis     | 5-15 min                            |
+| 24-sample E1A analyses         | 10-30 min                           |
+| GSEA GO / KEGG / TRED sections | may take several additional minutes |
+
+The most time-consuming steps are DESeq2 model fitting, GSEA analysis, and generation of large HTML reports with embedded figures.
+
+------------------------------------------------------------------------
+
+### Reusable functions
+
+Repeated plotting and enrichment-analysis code was moved to:
+
+``` R
+R/functions.R 
+```
+
+This script contains reusable functions for:
+
+-   heatmaps of top differentially expressed genes
+
+-   volcano plots
+
+-   GSEA GO analysis
+
+-   GSEA KEGG analysis
+
+-   TRED transcription factor target enrichment
+
+These functions are loaded in R Markdown reports using:
+
+``` R
+source("R/functions.R") 
+```
+
+This allows the main analysis reports to reuse common plotting and enrichment steps instead of copying the same code multiple times.
+
+### Notes
+
+Because Salmon quantification files are not distributed with the repository, full rerunning of the analyses requires local access to these files. The rendered HTML reports in `results/` are provided for inspection of the completed analyses.\
+To fully reproduce the results, the required input data and R/Bioconductor packages must be installed locally.
 
 ------------------------------------------------------------------------
 
